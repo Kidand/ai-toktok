@@ -4,6 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { NarrativeEntry } from '@/lib/types';
+import { streamNarrationBrowser, parseNarrationResponse, generateEpilogueBrowser } from '@/lib/narrator-browser';
 
 export default function PlayPage() {
   const router = useRouter();
@@ -28,59 +29,29 @@ export default function PlayPage() {
     }
   }, [narrativeHistory, streamingText]);
 
-  // SSE streaming helper
+  // Browser-side streaming helper
   const streamNarrate = useCallback(async (action: string, playerInput?: string) => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
     setIsGenerating(true);
     setStreamingText('');
 
+    const input = action === 'opening' ? '（我刚刚来到这个世界，环顾四周）' : (playerInput || '');
+
     try {
-      const res = await fetch('/api/narrate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action,
-          config: llmConfig,
-          story: parsedStory,
-          playerConfig,
-          guardrail: guardrailParams,
-          balance: narrativeBalance,
-          history: narrativeHistory,
-          playerInput: playerInput || '',
-        }),
-      });
+      const raw = await streamNarrationBrowser(
+        llmConfig, parsedStory, playerConfig,
+        guardrailParams, narrativeBalance,
+        narrativeHistory, input,
+        (token) => setStreamingText(prev => prev + token),
+      );
 
-      const reader = res.body!.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let accumulated = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          try {
-            const evt = JSON.parse(line.slice(6));
-            if (evt.type === 'token') {
-              accumulated += evt.token;
-              setStreamingText(accumulated);
-            } else if (evt.type === 'done') {
-              setStreamingText('');
-              addNarrativeEntries(evt.entries);
-              if (evt.interactions?.length) {
-                addCharacterInteractions(evt.interactions);
-              }
-              autoSave();
-            }
-          } catch { /* skip malformed */ }
-        }
+      setStreamingText('');
+      const result = parseNarrationResponse(raw, parsedStory, input);
+      addNarrativeEntries(result.entries);
+      if (result.interactions?.length) {
+        addCharacterInteractions(result.interactions as Parameters<typeof addCharacterInteractions>[0]);
       }
+      autoSave();
     } catch (err) {
       console.error('叙事生成失败:', err);
     } finally {
@@ -132,22 +103,13 @@ export default function PlayPage() {
   };
 
   const handleEndStory = async () => {
-    if (!llmConfig) return;
+    if (!llmConfig || !parsedStory || !playerConfig) return;
     setIsGenerating(true);
     try {
-      const res = await fetch('/api/epilogue', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          config: llmConfig,
-          story: parsedStory,
-          playerConfig,
-          characterInteractions,
-          narrativeHistory,
-        }),
-      });
-      const data = await res.json();
-      completeGame(data.epilogue);
+      const epilogue = await generateEpilogueBrowser(
+        llmConfig, parsedStory, playerConfig, characterInteractions,
+      );
+      completeGame(epilogue);
       router.push('/epilogue');
     } catch (err) {
       console.error('生成后日谈失败:', err);

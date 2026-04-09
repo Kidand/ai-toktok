@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { EntryMode, Character } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
+import { generateReincarnationBrowser } from '@/lib/narrator-browser';
 
 export default function SetupPage() {
   const router = useRouter();
@@ -37,19 +38,10 @@ export default function SetupPage() {
   }
 
   const handleGenerateReincarnation = async () => {
-    if (!llmConfig) return;
+    if (!llmConfig || !parsedStory) return;
     setIsGenerating(true);
     try {
-      const res = await fetch('/api/narrate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'reincarnation',
-          config: llmConfig,
-          story: parsedStory,
-        }),
-      });
-      const data = await res.json();
+      const data = await generateReincarnationBrowser(llmConfig, parsedStory);
       setReincarnation({
         id: uuid(),
         name: data.name,

@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { LLMProvider, GameSave } from '@/lib/types';
 import { loadStory, deleteSave } from '@/lib/storage';
+import { parseStoryClient } from '@/lib/parser-client';
 
 export default function HomePage() {
   const router = useRouter();
@@ -70,41 +71,9 @@ export default function HomePage() {
     setIsParsing(true);
 
     try {
-      // 1. 提交解析任务（瞬间返回）
-      const submitRes = await fetch('/api/parse', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ config, storyText }),
-      });
-      const submitData = await submitRes.json();
-      if (!submitRes.ok) throw new Error(submitData.error || '提交失败');
-
-      const { jobId } = submitData;
-
-      // 2. 轮询查询进度（每2秒一次，每次请求都是短时的）
-      while (true) {
-        await new Promise(r => setTimeout(r, 2000));
-
-        const pollRes = await fetch(`/api/parse?jobId=${jobId}`);
-        const pollData = await pollRes.json();
-        if (!pollRes.ok) throw new Error(pollData.error || '查询失败');
-
-        // 更新进度
-        if (pollData.progress) {
-          setParseProgress(pollData.progress);
-        }
-
-        if (pollData.status === 'done') {
-          setParsedStory(pollData.result);
-          router.push('/setup');
-          return;
-        }
-
-        if (pollData.status === 'error') {
-          throw new Error(pollData.error);
-        }
-        // status === 'running' → 继续轮询
-      }
+      const result = await parseStoryClient(config, storyText, (p) => setParseProgress(p));
+      setParsedStory(result);
+      router.push('/setup');
     } catch (err) {
       setError(err instanceof Error ? err.message : '故事解析失败');
     } finally {
