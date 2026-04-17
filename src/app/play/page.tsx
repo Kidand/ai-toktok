@@ -136,9 +136,10 @@ export default function PlayPage() {
     if (!text || isGenerating || !llmConfig) return;
 
     const hasSystem = parsed.mentions.some(m => m.kind === 'system');
-    const characterMentions = parsed.mentions
-      .filter(m => m.kind === 'character')
-      .map(m => m.name);
+    // De-dup character mentions in case same character was @'d twice
+    const characterMentions = Array.from(new Set(
+      parsed.mentions.filter(m => m.kind === 'character').map(m => m.name),
+    ));
 
     inputRef.current?.clear();
 

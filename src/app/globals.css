@@ -421,6 +421,15 @@ body {
   cursor: not-allowed;
 }
 .mention-option.is-disabled:hover { background: transparent; }
+.mention-restriction-banner {
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: var(--surface-3);
+  border-radius: var(--radius-sm);
+  border-left: 2px solid var(--accent);
+}
 .mention-option-body {
   display: flex;
   flex-direction: column;

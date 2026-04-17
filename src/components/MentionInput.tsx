@@ -56,12 +56,31 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
   const [query, setQuery] = useState('');
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [popupAnchor, setPopupAnchor] = useState<{ top: number; left: number } | null>(null);
+  const [currentMentions, setCurrentMentions] = useState<MentionParsed['mentions']>([]);
   /** DOM node of the `@` text currently being edited (if any). Used to replace on selection. */
   const draftRangeRef = useRef<{ textNode: Text; startOffset: number; endOffset: number } | null>(null);
   /** Track whether an IME composition is in progress to avoid intercepting Enter. */
   const isComposingRef = useRef(false);
 
-  const filtered = filterCandidates(candidates, query);
+  const hasSystemMention = currentMentions.some(m => m.kind === 'system');
+  const hasCharacterMention = currentMentions.some(m => m.kind === 'character');
+
+  const effectiveCandidates: MentionCandidate[] = candidates.map(c => {
+    if (hasSystemMention && c.kind === 'character') {
+      return { ...c, interactable: false, hint: '本回合已@系统' };
+    }
+    if (hasCharacterMention && c.kind === 'system') {
+      return { ...c, interactable: false, hint: '本回合已@角色' };
+    }
+    return c;
+  });
+
+  const filtered = filterCandidates(effectiveCandidates, query);
+  const restrictionBanner = hasSystemMention
+    ? '系统咨询独立进行，本回合不可再 @ 角色'
+    : hasCharacterMention
+      ? '本回合已 @ 角色，不能再 @ 系统'
+      : null;
 
   function nextSelectable(from: number, dir: 1 | -1): number {
     const n = filtered.length;
@@ -76,12 +95,22 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
     return i < 0 ? 0 : i;
   }
 
+  function syncParsed() {
+    const editor = editorRef.current;
+    if (!editor) return { plainText: '', mentions: [] };
+    const parsed = parseEditor(editor);
+    setCurrentMentions(parsed.mentions);
+    onChange?.(parsed);
+    return parsed;
+  }
+
   useImperativeHandle(ref, () => ({
     focus: () => editorRef.current?.focus(),
     clear: () => {
       if (editorRef.current) {
         editorRef.current.innerHTML = '';
-        onChange?.(parseEditor(editorRef.current));
+        setCurrentMentions([]);
+        onChange?.({ plainText: '', mentions: [] });
       }
     },
     getParsed: () => editorRef.current ? parseEditor(editorRef.current) : { plainText: '', mentions: [] },
@@ -115,7 +144,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
   function handleInput() {
     const editor = editorRef.current;
     if (!editor) return;
-    onChange?.(parseEditor(editor));
+    syncParsed();
 
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
@@ -185,7 +214,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
     sel?.addRange(range);
 
     closePopup();
-    onChange?.(parseEditor(editor));
+    syncParsed();
   }
 
   /**
@@ -223,7 +252,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
     }
     if (!target) return false;
     target.remove();
-    onChange?.(parseEditor(editor));
+    syncParsed();
     return true;
   }
 
@@ -236,7 +265,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
       if (chip && editor && editor.contains(chip)) {
         chip.remove();
         editor.focus();
-        onChange?.(parseEditor(editor));
+        syncParsed();
       }
     }
   }
@@ -307,6 +336,11 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
             zIndex: 60,
           }}
         >
+          {restrictionBanner && (
+            <div className="mention-restriction-banner">
+              {restrictionBanner}
+            </div>
+          )}
           {filtered.map((c, i) => (
             <button
               key={c.id}
