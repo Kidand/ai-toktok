@@ -3,8 +3,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
-import { NarrativeEntry } from '@/lib/types';
 import { streamNarrationBrowser, parseNarrationResponse, generateEpilogueBrowser } from '@/lib/narrator-browser';
+import { NarrativeFeed } from '@/components/NarrativeFeed';
+import { ArrowLeft, Users, Send, Close, CheckCircle } from '@/components/Icons';
 
 export default function PlayPage() {
   const router = useRouter();
@@ -19,17 +20,16 @@ export default function PlayPage() {
   const [input, setInput] = useState('');
   const [showSidebar, setShowSidebar] = useState(false);
   const [streamingText, setStreamingText] = useState('');
+  const [endConfirm, setEndConfirm] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
-  // 自动滚动到底部
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [narrativeHistory, streamingText]);
 
-  // Browser-side streaming helper
   const streamNarrate = useCallback(async (action: string, playerInput?: string) => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
     setIsGenerating(true);
@@ -44,7 +44,6 @@ export default function PlayPage() {
         narrativeHistory, input,
         (token) => setStreamingText(prev => prev + token),
       );
-
       setStreamingText('');
       const result = parseNarrationResponse(raw, parsedStory, input);
       addNarrativeEntries(result.entries);
@@ -60,7 +59,6 @@ export default function PlayPage() {
     }
   }, [llmConfig, parsedStory, playerConfig, guardrailParams, narrativeBalance, narrativeHistory, addNarrativeEntries, addCharacterInteractions, autoSave, setIsGenerating]);
 
-  // 生成开场
   const generateOpening = useCallback(async () => {
     if (!llmConfig || !parsedStory || !playerConfig || narrativeHistory.length > 0) return;
     await streamNarrate('opening');
@@ -74,12 +72,10 @@ export default function PlayPage() {
 
   if (!parsedStory || !playerConfig || !isPlaying) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
+      <div className="min-h-screen flex items-center justify-center p-6">
         <div className="text-center">
           <p className="text-muted mb-4">请先完成故事设置</p>
-          <button onClick={() => router.push('/')} className="text-accent hover:underline">
-            返回首页
-          </button>
+          <button onClick={() => router.push('/')} className="btn btn-outline">返回首页</button>
         </div>
       </div>
     );
@@ -92,23 +88,17 @@ export default function PlayPage() {
   const handleSendInput = async (text?: string) => {
     const msg = text || input.trim();
     if (!msg || isGenerating || !llmConfig) return;
-
     setInput('');
     addPlayerAction(msg);
     await streamNarrate('narrate', msg);
   };
 
-  const handleChoiceClick = (choiceText: string) => {
-    handleSendInput(choiceText);
-  };
-
   const handleEndStory = async () => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
+    setEndConfirm(false);
     setIsGenerating(true);
     try {
-      const epilogue = await generateEpilogueBrowser(
-        llmConfig, parsedStory, playerConfig, characterInteractions,
-      );
+      const epilogue = await generateEpilogueBrowser(llmConfig, parsedStory, playerConfig, characterInteractions);
       completeGame(epilogue);
       router.push('/epilogue');
     } catch (err) {
@@ -119,184 +109,148 @@ export default function PlayPage() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSendInput();
     }
   };
 
-  // 获取最后一条带选项的记录
   const lastChoices = [...narrativeHistory].reverse().find(e => e.choices?.length)?.choices;
+  const canEnd = narrativeHistory.length >= 4;
 
   return (
-    <div className="h-screen flex flex-col">
+    <div className="h-screen flex flex-col bg-background">
       {/* 顶栏 */}
-      <header className="flex items-center justify-between px-6 py-3 border-b border-card-border bg-card-bg/80 backdrop-blur shrink-0">
-        <div className="flex items-center gap-4">
-          <button onClick={() => router.push('/')} className="text-muted text-sm hover:text-foreground">
-            &larr;
+      <header className="glass border-b px-3 sm:px-5 py-3 flex items-center justify-between shrink-0 safe-top">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <button onClick={() => router.push('/')} className="btn btn-ghost btn-sm" aria-label="返回">
+            <ArrowLeft />
           </button>
-          <div>
-            <h1 className="font-bold text-sm" style={{ color: 'var(--accent)' }}>{parsedStory.title}</h1>
-            <p className="text-xs text-muted">
+          <div className="min-w-0">
+            <h1 className="font-bold text-sm truncate" style={{ color: 'var(--accent)' }}>{parsedStory.title}</h1>
+            <p className="text-xs text-muted font-sans truncate">
               {playerChar?.name || '旅人'} · {playerConfig.entryMode === 'soul-transfer' ? '魂穿' : '转生'}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setShowSidebar(!showSidebar)}
-            className="text-muted text-sm hover:text-foreground px-2 py-1 rounded"
-          >
-            角色
+        <div className="flex items-center gap-1 shrink-0">
+          <button onClick={() => setShowSidebar(true)} className="btn btn-ghost btn-sm" aria-label="角色">
+            <Users />
           </button>
-          <button
-            onClick={handleEndStory}
-            disabled={isGenerating || narrativeHistory.length < 4}
-            className="text-sm px-3 py-1.5 rounded-lg border border-card-border text-muted hover:text-foreground hover:border-accent/30 transition-colors disabled:opacity-30"
-          >
-            结束故事
+          <button onClick={() => setEndConfirm(true)} disabled={isGenerating || !canEnd}
+                  className="btn btn-outline btn-sm">
+            <span className="hidden sm:inline">结束故事</span>
+            <span className="sm:hidden">结束</span>
           </button>
         </div>
       </header>
 
-      <div className="flex flex-1 overflow-hidden">
-        {/* 主叙事区 */}
-        <div className="flex-1 flex flex-col">
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6 space-y-4">
-            {narrativeHistory.map((entry) => (
-              <NarrativeEntryView key={entry.id} entry={entry} playerName={playerChar?.name} />
-            ))}
-            {isGenerating && (
-              <div className="narrative-entry leading-relaxed text-foreground/90">
-                {streamingText ? (
-                  streamingText.split('\n').map((line, i) => (
-                    <p key={i} className="mb-2">{line}<span className="typing-cursor" /></p>
-                  ))
-                ) : (
-                  <p className="text-muted italic typing-cursor">正在书写...</p>
-                )}
-              </div>
-            )}
-          </div>
-
-          {/* 选项区 */}
-          {lastChoices && lastChoices.length > 0 && !isGenerating && (
-            <div className="px-6 pb-2 flex flex-wrap gap-2">
-              {lastChoices.map(choice => (
-                <button
-                  key={choice.id}
-                  onClick={() => handleChoiceClick(choice.text)}
-                  className={`px-4 py-2 rounded-lg text-sm border transition-all hover:border-accent/50 ${
-                    choice.isBranchPoint
-                      ? 'border-accent/40 bg-accent/5 branch-indicator'
-                      : 'border-card-border bg-card-bg'
-                  }`}
-                >
-                  {choice.text}
-                </button>
-              ))}
-            </div>
+      {/* 主叙事区 */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+        <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6">
+          {!canEnd && (
+            <p className="text-xs text-muted-dim text-center mb-6 font-sans">
+              故事刚刚开始 · 与世界互动至少 4 次后可结束
+            </p>
           )}
+          <NarrativeFeed
+            entries={narrativeHistory}
+            playerName={playerChar?.name}
+            streamingText={streamingText}
+            isGenerating={isGenerating}
+          />
+        </div>
+      </div>
 
-          {/* 输入区 */}
-          <div className="px-6 py-4 border-t border-card-border bg-card-bg/50">
-            <div className="flex gap-3 items-end">
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="你想做什么..."
-                rows={1}
-                disabled={isGenerating}
-                className="flex-1 bg-input-bg border border-card-border rounded-xl px-4 py-3 text-foreground text-sm resize-none focus:outline-none focus:border-accent disabled:opacity-50"
-                style={{ minHeight: '44px', maxHeight: '120px' }}
-              />
-              <button
-                onClick={() => handleSendInput()}
-                disabled={!input.trim() || isGenerating}
-                className="px-5 py-3 rounded-xl font-medium text-sm transition-all disabled:opacity-30"
-                style={{ background: 'var(--accent)', color: 'black' }}
-              >
-                行动
+      {/* 选项区 */}
+      {lastChoices && lastChoices.length > 0 && !isGenerating && (
+        <div className="shrink-0 px-4 sm:px-6 pb-2 anim-fade-in">
+          <div className="max-w-3xl mx-auto flex flex-wrap gap-2">
+            {lastChoices.map(choice => (
+              <button key={choice.id} onClick={() => handleSendInput(choice.text)}
+                      className={`chip hover:border-accent transition-colors cursor-pointer ${choice.isBranchPoint ? 'chip-accent branch-marker' : ''}`}
+                      style={{ padding: '6px 12px', fontSize: '0.8rem' }}>
+                {choice.text}
               </button>
-            </div>
+            ))}
           </div>
         </div>
+      )}
 
-        {/* 侧边栏 - 角色列表 */}
-        {showSidebar && (
-          <div className="w-72 border-l border-card-border bg-card-bg overflow-y-auto p-4">
-            <h2 className="text-sm font-medium text-muted mb-3 uppercase tracking-widest">角色</h2>
-            <div className="space-y-3">
+      {/* 输入区 */}
+      <div className="glass border-t shrink-0 px-3 sm:px-5 py-3 pb-safe">
+        <div className="max-w-3xl mx-auto flex gap-2 items-end">
+          <textarea ref={inputRef} value={input} onChange={e => setInput(e.target.value)}
+                    onKeyDown={handleKeyDown}
+                    placeholder={isGenerating ? '角色正在响应...' : '你想做什么...'}
+                    rows={1} disabled={isGenerating}
+                    className="textarea flex-1"
+                    style={{ minHeight: '44px', maxHeight: '140px' }} />
+          <button onClick={() => handleSendInput()} disabled={!input.trim() || isGenerating}
+                  className="btn btn-primary shrink-0" aria-label="发送">
+            <Send width={18} height={18} />
+            <span className="hidden sm:inline">行动</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 角色侧栏 / 底部抽屉 */}
+      {showSidebar && (
+        <>
+          <div className="fixed inset-0 bg-black/50 z-40 anim-fade-in" onClick={() => setShowSidebar(false)} />
+          <aside className="fixed z-50 anim-slide-up surface-raised overflow-hidden flex flex-col
+                            right-0 top-0 bottom-0 w-full sm:w-80 sm:border-l
+                            rounded-none">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+              <h2 className="font-bold">角色</h2>
+              <button onClick={() => setShowSidebar(false)} className="btn btn-ghost btn-sm" aria-label="关闭">
+                <Close />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-3 space-y-2">
               {parsedStory.characters.map(char => {
                 const interaction = characterInteractions.find(ci => ci.characterId === char.id);
+                const isPlayer = char.id === playerConfig.characterId;
                 return (
-                  <div key={char.id} className="p-3 rounded-lg border border-card-border">
-                    <div className="font-medium text-sm flex items-center gap-2">
-                      {char.name}
-                      {char.id === playerConfig.characterId && (
-                        <span className="text-xs px-1.5 py-0.5 rounded bg-accent/20 text-accent">你</span>
+                  <div key={char.id} className="surface p-3 flex gap-3">
+                    <div className="avatar avatar-sm">{char.name[0]}</div>
+                    <div className="min-w-0 flex-1">
+                      <div className="font-medium text-sm flex items-center gap-2">
+                        <span className="truncate">{char.name}</span>
+                        {isPlayer && <span className="chip chip-accent" style={{ padding: '1px 6px', fontSize: '0.65rem' }}>你</span>}
+                      </div>
+                      <p className="text-xs text-muted mt-1 line-clamp-2">{char.personality}</p>
+                      {interaction && interaction.interactions.length > 0 && (
+                        <p className="text-xs mt-1.5 font-sans" style={{ color: 'var(--teal)' }}>
+                          {interaction.interactions.length} 次互动
+                        </p>
                       )}
                     </div>
-                    <p className="text-xs text-muted mt-1 line-clamp-2">{char.personality}</p>
-                    {interaction && (
-                      <p className="text-xs mt-2" style={{ color: 'var(--accent)' }}>
-                        {interaction.interactions.length} 次互动
-                      </p>
-                    )}
                   </div>
                 );
               })}
             </div>
+          </aside>
+        </>
+      )}
+
+      {/* 结束确认 */}
+      {endConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 anim-fade-in"
+             onClick={() => setEndConfirm(false)}>
+          <div className="surface-raised max-w-sm w-full p-6" onClick={e => e.stopPropagation()}>
+            <CheckCircle className="mx-auto mb-3" style={{ color: 'var(--accent)' }} width={32} height={32} />
+            <h3 className="text-lg font-bold text-center mb-2">确认结束故事？</h3>
+            <p className="text-sm text-muted text-center mb-5 font-sans">
+              AI 将根据你与各角色的互动生成后日谈，<br />结束后故事不可再继续。
+            </p>
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={() => setEndConfirm(false)} className="btn btn-outline">取消</button>
+              <button onClick={handleEndStory} className="btn btn-primary">生成后日谈</button>
+            </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
-}
-
-function NarrativeEntryView({ entry, playerName }: { entry: NarrativeEntry; playerName?: string }) {
-  switch (entry.type) {
-    case 'narration':
-      return (
-        <div className="narrative-entry leading-relaxed text-foreground/90">
-          {entry.content.split('\n').map((line, i) => (
-            <p key={i} className="mb-2">{line}</p>
-          ))}
-        </div>
-      );
-    case 'dialogue':
-      return (
-        <div className="narrative-entry flex gap-3 items-start">
-          <span
-            className="shrink-0 font-bold text-sm px-2 py-0.5 rounded"
-            style={{
-              color: entry.speaker === playerName ? 'var(--accent)' : 'var(--foreground)',
-              background: entry.speaker === playerName ? 'var(--accent-dim)' : 'var(--card-border)',
-            }}
-          >
-            {entry.speaker}
-          </span>
-          <p className="text-foreground/90 leading-relaxed">&ldquo;{entry.content}&rdquo;</p>
-        </div>
-      );
-    case 'player-action':
-      return (
-        <div className="narrative-entry text-right">
-          <span className="inline-block px-4 py-2 rounded-xl text-sm" style={{ background: 'var(--accent-dim)', color: 'var(--accent)' }}>
-            {entry.content}
-          </span>
-        </div>
-      );
-    case 'system':
-      return (
-        <div className="narrative-entry text-center text-xs text-muted py-2">
-          {entry.content}
-        </div>
-      );
-    default:
-      return null;
-  }
 }
