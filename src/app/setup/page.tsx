@@ -75,7 +75,7 @@ export default function SetupPage() {
   };
 
   return (
-    <div className="min-h-screen safe-top" style={{ paddingBottom: 'calc(7rem + env(safe-area-inset-bottom))' }}>
+    <div className="min-h-screen safe-top" style={{ paddingBottom: 'calc(10rem + env(safe-area-inset-bottom))' }}>
       {/* 顶栏 */}
       <div className="sticky top-0 z-20 glass border-b px-4 sm:px-6 py-3 flex items-center gap-3">
         <button onClick={() => router.push('/')} className="btn btn-ghost btn-sm" aria-label="返回">
