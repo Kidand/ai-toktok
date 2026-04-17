@@ -22,6 +22,7 @@ export default function PlayPage() {
   } = useGameStore();
 
   const [showSidebar, setShowSidebar] = useState(false);
+  const [expandedCharId, setExpandedCharId] = useState<string | null>(null);
   const [streamingState, setStreamingState] = useState<StreamingState>({ narration: '', dialogues: [] });
   const [endConfirm, setEndConfirm] = useState(false);
   const [systemHint, setSystemHint] = useState<{ question: string; answer: string; loading: boolean } | null>(null);
@@ -316,28 +317,91 @@ export default function PlayPage() {
                 const interaction = characterInteractions.find(ci => ci.characterId === char.id);
                 const isPlayer = char.id === playerConfig.characterId;
                 const isPresent = presentNames.has(char.name);
+                const isExpanded = expandedCharId === char.id;
+                const relationships = char.relationships
+                  .map(r => {
+                    const target = parsedStory.characters.find(c => c.id === r.characterId);
+                    return target ? { name: target.name, relation: r.relation } : null;
+                  })
+                  .filter((r): r is { name: string; relation: string } => r !== null);
                 return (
-                  <div key={char.id} className="surface p-3 flex gap-3">
-                    <div className="relative">
-                      <div className="avatar avatar-md" data-speaker-color={isPlayer ? 'yellow' : speakerColor(char.name)}>{char.name[0]}</div>
-                      {!isPlayer && (
-                        <span className={`mention-status-dot ${isPresent ? 'is-on' : ''}`}
-                              style={{ position: 'absolute', bottom: -3, right: -3, width: 12, height: 12 }} />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="font-sans font-bold text-sm flex items-center gap-2">
-                        <span className="truncate">{char.name}</span>
-                        {isPlayer && <span className="chip chip-accent" style={{ padding: '1px 6px', fontSize: '0.62rem' }}>YOU</span>}
+                  <div key={char.id} className="surface overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedCharId(isExpanded ? null : char.id)}
+                      className="w-full p-3 flex gap-3 text-left transition-colors hover:bg-[var(--hi-yellow-soft)]"
+                      aria-expanded={isExpanded}
+                    >
+                      <div className="relative shrink-0">
+                        <div className="avatar avatar-md" data-speaker-color={isPlayer ? 'yellow' : speakerColor(char.name)}>{char.name[0]}</div>
+                        {!isPlayer && (
+                          <span className={`mention-status-dot ${isPresent ? 'is-on' : ''}`}
+                                style={{ position: 'absolute', bottom: -3, right: -3, width: 12, height: 12 }} />
+                        )}
                       </div>
-                      <p className="text-xs text-[var(--ink-muted)] mt-1 line-clamp-2 font-serif">{char.personality}</p>
-                      {interaction && interaction.interactions.length > 0 && (
-                        <p className="text-[11px] mt-1.5 font-mono">
-                          <span className="text-[var(--ink-muted)]">interactions · </span>
-                          <span className="font-bold text-[var(--ink)]">{interaction.interactions.length}</span>
-                        </p>
-                      )}
-                    </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="font-sans font-bold text-sm flex items-center gap-2">
+                          <span className="truncate">{char.name}</span>
+                          {isPlayer && <span className="chip chip-accent" style={{ padding: '1px 6px', fontSize: '0.62rem' }}>YOU</span>}
+                        </div>
+                        <p className={`text-xs text-[var(--ink-muted)] mt-1 font-serif ${isExpanded ? '' : 'line-clamp-2'}`}>{char.personality}</p>
+                        {interaction && interaction.interactions.length > 0 && (
+                          <p className="text-[11px] mt-1.5 font-mono">
+                            <span className="text-[var(--ink-muted)]">interactions · </span>
+                            <span className="font-bold text-[var(--ink)]">{interaction.interactions.length}</span>
+                          </p>
+                        )}
+                      </div>
+                      <span className="font-mono text-[var(--ink-muted)] text-xs shrink-0 self-center"
+                            style={{ transform: isExpanded ? 'rotate(90deg)' : 'none', transition: 'transform 0.15s ease' }}>
+                        ▸
+                      </span>
+                    </button>
+
+                    {isExpanded && (
+                      <div className="anim-fade-in border-t-[2.5px] border-[var(--ink)] bg-[var(--paper-softsink)] p-3 space-y-3">
+                        {char.description && (
+                          <div>
+                            <div className="label-mono text-[9.5px] mb-1">描述</div>
+                            <p className="font-serif text-sm text-[var(--ink)] leading-relaxed">{char.description}</p>
+                          </div>
+                        )}
+                        {char.background && (
+                          <div>
+                            <div className="label-mono text-[9.5px] mb-1">背景</div>
+                            <p className="font-serif text-sm text-[var(--ink)] leading-relaxed">{char.background}</p>
+                          </div>
+                        )}
+                        {relationships.length > 0 && (
+                          <div>
+                            <div className="label-mono text-[9.5px] mb-1.5">关系</div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {relationships.map((r, i) => (
+                                <span key={i} className="chip">
+                                  <span className="font-bold">{r.name}</span>
+                                  <span className="text-[var(--ink-muted)] font-normal">· {r.relation}</span>
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {interaction && interaction.interactions.length > 0 && (
+                          <div>
+                            <div className="label-mono text-[9.5px] mb-1.5">近期互动</div>
+                            <ul className="space-y-1.5 font-serif text-xs text-[var(--ink-soft)]">
+                              {interaction.interactions.slice(-3).reverse().map((it, i) => (
+                                <li key={i} className="pl-2 border-l-2 border-[var(--ink)]">
+                                  <span className="font-mono text-[10px] text-[var(--ink-muted)] block">
+                                    {it.sentiment === 'positive' ? '+ 好感' : it.sentiment === 'negative' ? '- 嫌隙' : '· 中立'}
+                                  </span>
+                                  {it.event}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
