@@ -8,12 +8,6 @@
 /.next/
 /out/
 
-# python
-backend/.venv/
-backend/__pycache__/
-__pycache__/
-*.pyc
-
 # env & secrets
 .env*
 !.env.example

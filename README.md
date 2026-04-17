@@ -1,36 +1,45 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# AI TokTok
 
-## Getting Started
+沉浸式 IP 互动叙事沙盒。纯客户端应用 — 浏览器直接调用 OpenAI / Anthropic API，无需后端。
 
-First, run the development server:
+## 本地启动
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+./start.sh
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+或者手动：
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+打开 http://localhost:3000
 
-## Learn More
+> API 密钥在页面的「设置」里填入，保存在浏览器 `localStorage`，不会发到任何服务器。
 
-To learn more about Next.js, take a look at the following resources:
+## 技术栈
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- Next.js 16 (App Router, static export)
+- React 19
+- Zustand (状态管理)
+- Tailwind CSS 4
+- TypeScript
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 项目结构
 
-## Deploy on Vercel
+```
+src/
+├── app/          页面路由 (setup / play / characters / archive / epilogue)
+├── lib/          核心逻辑 (llm-browser, narrator, parser, storage, types)
+└── store/        Zustand 游戏状态
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## 部署
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+推到 `main` 分支后，GitHub Actions 自动构建并部署到 GitHub Pages。
+
+- Workflow: `.github/workflows/deploy.yml`
+- 发布地址: `https://<user>.github.io/ai-toktok/`
+- `next.config.ts` 会在 CI 环境下自动加上 `/ai-toktok` 的 `basePath`，本地开发不受影响。
