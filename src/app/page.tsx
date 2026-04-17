@@ -236,7 +236,7 @@ export default function HomePage() {
                     {parseProgress.phase === 'parse' && (
                       parseProgress.total === 1
                         ? '正在解析故事...'
-                        : `增量解析 ${parseProgress.current}/${parseProgress.total} 段`
+                        : `增量解析 ${parseProgress.current.toFixed(2)}/${parseProgress.total} 段`
                     )}
                     {parseProgress.phase === 'polish' && '正在生成统一概要...'}
                     {parseProgress.phase === 'build' && '正在构建故事世界...'}
