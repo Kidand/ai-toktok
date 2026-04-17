@@ -6,7 +6,7 @@ import { useGameStore } from '@/store/gameStore';
 import { EntryMode, Character } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
 import { generateReincarnationBrowser } from '@/lib/narrator-browser';
-import { ArrowLeft, Users, Sparkles, Refresh, Play } from '@/components/Icons';
+import { ArrowLeft, Users, Wand, Spinner, Refresh, Play } from '@/components/Icons';
 
 export default function SetupPage() {
   const router = useRouter();
@@ -173,11 +173,21 @@ export default function SetupPage() {
               </div>
             ) : (
               <button onClick={handleGenerateReincarnation} disabled={isGenerating}
-                      className="w-full surface p-8 text-center transition-colors hover:border-accent/50 border-dashed"
+                      className="w-full surface p-8 text-center transition-colors hover:border-accent/50"
                       style={{ borderStyle: 'dashed' }}>
-                <Sparkles className="mx-auto mb-2" style={{ color: 'var(--accent)' }} />
-                <p className="font-medium">{isGenerating ? '正在生成角色...' : '点击生成转生角色'}</p>
-                <p className="text-xs text-muted-dim mt-1 font-sans">AI 将根据世界观创造一个合适的新角色</p>
+                {isGenerating ? (
+                  <>
+                    <Spinner className="mx-auto mb-2" style={{ color: 'var(--accent)' }} />
+                    <p className="font-medium">正在生成角色...</p>
+                    <p className="text-xs text-muted-dim mt-1 font-sans">AI 正在构思一个与世界观契合的新角色</p>
+                  </>
+                ) : (
+                  <>
+                    <Wand className="mx-auto mb-2" style={{ color: 'var(--accent)' }} />
+                    <p className="font-medium">点击生成转生角色</p>
+                    <p className="text-xs text-muted-dim mt-1 font-sans">AI 将根据世界观创造一个合适的新角色</p>
+                  </>
+                )}
               </button>
             )}
           </section>

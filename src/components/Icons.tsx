@@ -91,3 +91,15 @@ export const Refresh = (p: IconProps) => (
     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
   </svg>
 );
+
+export const Wand = (p: IconProps) => (
+  <svg {...base} {...p}>
+    <path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8 19 13M17.8 6.2 19 5M3 21l9-9M12.2 6.2 11 5" />
+  </svg>
+);
+
+export const Spinner = (p: IconProps) => (
+  <svg {...base} {...p} style={{ animation: 'spin 0.8s linear infinite', ...p.style }}>
+    <path d="M21 12a9 9 0 1 1-6.22-8.56" />
+  </svg>
+);
