@@ -11,6 +11,7 @@
  */
 
 import { callLLMBrowser, streamLLMBrowser } from './llm-browser';
+import { stripThinking, extractFirstBalancedJSON } from './narrator-browser';
 import { LLMConfig, ParsedStory, Character, Location, KeyEvent, WorldSetting } from './types';
 import { v4 as uuid } from 'uuid';
 
@@ -193,9 +194,22 @@ function splitIntoChunks(text: string): string[] {
   return chunks;
 }
 
+/**
+ * Pull a parseable JSON document out of an LLM response.
+ *
+ * Strategy (in order): drop any reasoning-model `<think>` preamble, honour
+ * an explicit ```json fence if present, otherwise grab the first balanced
+ * JSON object/array in the cleaned buffer, otherwise fall back to the
+ * cleaned-trimmed string. Handles DeepSeek-R1 / MiniMax-M2 / Qwen-reasoning
+ * outputs where the thought process is mixed into the primary content.
+ */
 function extractJSON(response: string): string {
-  const match = response.match(/```(?:json)?\s*([\s\S]*?)```/);
-  return match ? match[1].trim() : response.trim();
+  const cleaned = stripThinking(response);
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) return fenced[1].trim();
+  const balanced = extractFirstBalancedJSON(cleaned);
+  if (balanced) return balanced;
+  return cleaned.trim();
 }
 
 async function sha256(text: string): Promise<string> {

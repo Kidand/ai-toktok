@@ -115,6 +115,63 @@ function buildHistoryContext(history: NarrativeEntry[], maxEntries = 20): string
 }
 
 /**
+ * Strip reasoning-model thinking prefixes from a response buffer.
+ *
+ * Reasoning-capable models served through OpenAI-compatible endpoints
+ * (DeepSeek-R1, MiniMax-M2, some Qwen/GLM tunes) often mix their chain-of-
+ * thought into the primary content stream, typically wrapped in
+ * `<think>...</think>` or `<thinking>...</thinking>` tags. That scrambles
+ * our JSON parsing.
+ *
+ * This helper removes:
+ *   - any complete `<think>…</think>` / `<thinking>…</thinking>` blocks
+ *   - any trailing unclosed `<think(...)` — mid-stream, thinking is still
+ *     being written and nothing after it is the real answer yet, so drop
+ *     from the opening tag onward
+ *
+ * Case-insensitive. Safe to call on a partial buffer (streaming) or on a
+ * completed response.
+ */
+export function stripThinking(buffer: string): string {
+  // Complete blocks — greedy removal
+  let out = buffer.replace(/<think(?:ing)?\b[^>]*>[\s\S]*?<\/think(?:ing)?>/gi, '');
+  // Unclosed trailing block — chop from the opener
+  const open = out.match(/<think(?:ing)?\b[^>]*>/i);
+  if (open && open.index !== undefined) out = out.slice(0, open.index);
+  return out;
+}
+
+/**
+ * Find the first balanced JSON value (object or array) inside a buffer,
+ * ignoring any preamble / trailing prose. Returns null if no balanced value
+ * is present yet. Handles string literals and escapes so braces inside
+ * strings don't throw off the depth counter.
+ */
+export function extractFirstBalancedJSON(buffer: string): string | null {
+  const openIdx = buffer.search(/[{[]/);
+  if (openIdx < 0) return null;
+  const open = buffer[openIdx];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0, inStr = false, esc = false;
+  for (let i = openIdx; i < buffer.length; i++) {
+    const c = buffer[i];
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === open) depth++;
+    else if (c === close) {
+      depth--;
+      if (depth === 0) return buffer.slice(openIdx, i + 1);
+    }
+  }
+  return null;
+}
+
+/**
  * Decode a (possibly partial) JSON string literal's body — the text between
  * the opening and closing quotes, minus the quotes themselves. Stops at the
  * first unescaped `"` (considered the closing quote) or at buffer exhaustion.
@@ -156,12 +213,14 @@ function decodePartialJSONString(buffer: string, start: number): { value: string
 
 /**
  * Extract the narration field value from a (possibly incomplete) JSON buffer
- * for streaming display.
+ * for streaming display. Thinking-model preambles (`<think>…</think>`) are
+ * stripped first so that the inner reasoning text never leaks into the UI.
  */
 export function extractStreamingNarration(buffer: string): string {
-  const keyMatch = buffer.match(/"narration"\s*:\s*"/);
+  const cleaned = stripThinking(buffer);
+  const keyMatch = cleaned.match(/"narration"\s*:\s*"/);
   if (!keyMatch || keyMatch.index === undefined) return '';
-  return decodePartialJSONString(buffer, keyMatch.index + keyMatch[0].length).value;
+  return decodePartialJSONString(cleaned, keyMatch.index + keyMatch[0].length).value;
 }
 
 export type StreamingDialogue = { speaker: string; content: string; partial?: boolean };
@@ -227,20 +286,26 @@ function extractPartialDialogue(buffer: string, objStart: number): StreamingDial
  * streaming JSON buffer. Designed for incremental UI rendering.
  */
 export function extractStreamingState(buffer: string): StreamingState {
-  const narration = extractStreamingNarration(buffer);
+  // Work on a thinking-stripped view so reasoning-model prose never leaks.
+  const cleaned = stripThinking(buffer);
+  const narration = (() => {
+    const keyMatch = cleaned.match(/"narration"\s*:\s*"/);
+    if (!keyMatch || keyMatch.index === undefined) return '';
+    return decodePartialJSONString(cleaned, keyMatch.index + keyMatch[0].length).value;
+  })();
   const dialogues: StreamingDialogue[] = [];
 
-  const arrMatch = buffer.match(/"dialogues"\s*:\s*\[/);
+  const arrMatch = cleaned.match(/"dialogues"\s*:\s*\[/);
   if (!arrMatch || arrMatch.index === undefined) return { narration, dialogues };
 
   let i = arrMatch.index + arrMatch[0].length;
-  while (i < buffer.length) {
-    while (i < buffer.length && /[\s,]/.test(buffer[i])) i++;
-    if (i >= buffer.length) break;
-    if (buffer[i] === ']') break;
-    if (buffer[i] !== '{') break;
+  while (i < cleaned.length) {
+    while (i < cleaned.length && /[\s,]/.test(cleaned[i])) i++;
+    if (i >= cleaned.length) break;
+    if (cleaned[i] === ']') break;
+    if (cleaned[i] !== '{') break;
 
-    const complete = tryParseBalancedObject(buffer, i);
+    const complete = tryParseBalancedObject(cleaned, i);
     if (complete) {
       const val = complete.value as { speaker?: string; content?: string };
       if (val.speaker || val.content) {
@@ -249,7 +314,7 @@ export function extractStreamingState(buffer: string): StreamingState {
       i = complete.endIdx;
     } else {
       // Partial trailing dialogue — show what we have and stop.
-      const partial = extractPartialDialogue(buffer, i);
+      const partial = extractPartialDialogue(cleaned, i);
       if (partial && (partial.content || partial.speaker)) dialogues.push(partial);
       break;
     }
@@ -259,16 +324,28 @@ export function extractStreamingState(buffer: string): StreamingState {
 
 /** Parse raw LLM JSON response into structured entries */
 export function parseNarrationResponse(raw: string, story: ParsedStory, playerInput: string) {
-  let jsonStr = raw;
-  const m = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (m) jsonStr = m[1];
+  // Reasoning-model safety: strip thinking wrappers first.
+  const cleaned = stripThinking(raw);
+
+  // Prefer explicit ```json fences, then fall back to 'first balanced JSON
+  // value in the buffer' (handles untagged preambles/outros), then last-
+  // resort the whole cleaned string.
+  let jsonStr = cleaned.trim();
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) jsonStr = fenced[1].trim();
+  else {
+    const balanced = extractFirstBalancedJSON(cleaned);
+    if (balanced) jsonStr = balanced;
+  }
 
   let parsed: { narration?: string; dialogues?: { speaker: string; content: string }[]; choices?: { text: string; isBranchPoint: boolean }[]; interactions?: { characterName: string; event: string; reaction: string; sentiment: string }[] };
   try {
-    parsed = JSON.parse(jsonStr.trim());
+    parsed = JSON.parse(jsonStr);
   } catch {
+    // Fallback: drop the raw buffer (thinking-stripped) as narration so at
+    // least something shows, but don't leak JSON scaffolding to the reader.
     return {
-      entries: [{ id: uuid(), type: 'narration' as const, content: raw, timestamp: Date.now(),
+      entries: [{ id: uuid(), type: 'narration' as const, content: cleaned || raw, timestamp: Date.now(),
         choices: [{ id: uuid(), text: '继续观察', isBranchPoint: false }, { id: uuid(), text: '与附近的人交谈', isBranchPoint: false }] }],
       interactions: [],
     };
@@ -341,10 +418,14 @@ ${playerChar?.name || '旅人'}（${playerConfig.entryMode === 'soul-transfer' ?
 ${recentContext || '（故事刚开始）'}
 `;
 
-  return callLLMBrowser(config, systemPrompt, question, {
+  const answer = await callLLMBrowser(config, systemPrompt, question, {
     temperature: 0.5,
     maxTokens: 400,
   });
+  // Reasoning models may wrap their thought process in <think>…</think>.
+  // The system hint is plain text for the UI — strip any such block before
+  // returning, and also chop any leftover trailing tags.
+  return stripThinking(answer).trim();
 }
 
 /**
@@ -468,20 +549,22 @@ export type EpilogueStreamState = {
  * its characterName while the memoir text is still being written.
  */
 function extractStreamingEpilogue(buffer: string, expectedCount: number): EpilogueStreamState {
+  // Strip reasoning-model thinking first so a mid-stream <think> block
+  // doesn't crash through as if it were the memoir body.
+  const cleaned = stripThinking(buffer);
   const entries: EpilogueStreamEntry[] = [];
 
-  // Find the first '[' (optionally preceded by ```json)
-  const arrStart = buffer.indexOf('[');
+  const arrStart = cleaned.indexOf('[');
   if (arrStart < 0) return { entries, expectedCount };
 
   let i = arrStart + 1;
-  while (i < buffer.length) {
-    while (i < buffer.length && /[\s,]/.test(buffer[i])) i++;
-    if (i >= buffer.length) break;
-    if (buffer[i] === ']') break;
-    if (buffer[i] !== '{') break;
+  while (i < cleaned.length) {
+    while (i < cleaned.length && /[\s,]/.test(cleaned[i])) i++;
+    if (i >= cleaned.length) break;
+    if (cleaned[i] === ']') break;
+    if (cleaned[i] !== '{') break;
 
-    const complete = tryParseBalancedObject(buffer, i);
+    const complete = tryParseBalancedObject(cleaned, i);
     if (complete) {
       const val = complete.value as { characterName?: string; memoir?: string };
       if (val.characterName || val.memoir) {
@@ -490,7 +573,7 @@ function extractStreamingEpilogue(buffer: string, expectedCount: number): Epilog
       i = complete.endIdx;
     } else {
       // Partial trailing memoir — pull whatever fields have started.
-      const slice = buffer.slice(i);
+      const slice = cleaned.slice(i);
       const nameKey = slice.match(/"characterName"\s*:\s*"/);
       const memoirKey = slice.match(/"memoir"\s*:\s*"/);
       const name = nameKey && nameKey.index !== undefined
@@ -627,10 +710,15 @@ ${transcript}
     }
   }
 
-  let jsonStr = full;
-  const m = full.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (m) jsonStr = m[1];
-  const parsed: { characterName: string; memoir: string }[] = JSON.parse(jsonStr.trim());
+  const cleanedFull = stripThinking(full);
+  let jsonStr = cleanedFull.trim();
+  const m = cleanedFull.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (m) jsonStr = m[1].trim();
+  else {
+    const balanced = extractFirstBalancedJSON(cleanedFull);
+    if (balanced) jsonStr = balanced;
+  }
+  const parsed: { characterName: string; memoir: string }[] = JSON.parse(jsonStr);
   return parsed.map(p => {
     const char = story.characters.find(c => c.name === p.characterName);
     return { characterId: char?.id || '', characterName: p.characterName, memoir: p.memoir };
@@ -644,8 +732,13 @@ export async function generateReincarnationBrowser(config: LLMConfig, story: Par
 
   const worldInfo = `世界：${story.title}\n时代：${story.worldSetting.era}\n类型：${story.worldSetting.genre}\n设定：${story.worldSetting.rules.join('；')}\n已有角色：${story.characters.map(c => c.name).join('、')}`;
   const response = await callLLMBrowser(config, systemPrompt, worldInfo, { temperature: 0.8 });
-  let jsonStr = response;
-  const m = response.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (m) jsonStr = m[1];
-  return JSON.parse(jsonStr.trim());
+  const cleaned = stripThinking(response);
+  let jsonStr = cleaned.trim();
+  const m = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (m) jsonStr = m[1].trim();
+  else {
+    const balanced = extractFirstBalancedJSON(cleaned);
+    if (balanced) jsonStr = balanced;
+  }
+  return JSON.parse(jsonStr);
 }
