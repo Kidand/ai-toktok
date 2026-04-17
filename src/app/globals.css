@@ -412,10 +412,15 @@ body {
   transition: background 0.15s ease;
   font-family: var(--font-sans);
 }
-.mention-option:hover,
-.mention-option.is-active {
+.mention-option:hover:not(.is-disabled),
+.mention-option.is-active:not(.is-disabled) {
   background: var(--surface-3);
 }
+.mention-option.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.mention-option.is-disabled:hover { background: transparent; }
 .mention-option-body {
   display: flex;
   flex-direction: column;

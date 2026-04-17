@@ -63,6 +63,19 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
 
   const filtered = filterCandidates(candidates, query);
 
+  function nextSelectable(from: number, dir: 1 | -1): number {
+    const n = filtered.length;
+    if (n === 0) return 0;
+    let i = from + dir;
+    while (i >= 0 && i < n && !filtered[i].interactable) i += dir;
+    if (i < 0 || i >= n) return from;
+    return i;
+  }
+  function firstSelectable(): number {
+    const i = filtered.findIndex(c => c.interactable);
+    return i < 0 ? 0 : i;
+  }
+
   useImperativeHandle(ref, () => ({
     focus: () => editorRef.current?.focus(),
     clear: () => {
@@ -125,7 +138,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
     const q = text.slice(i + 1, caret);
     draftRangeRef.current = { textNode, startOffset: i, endOffset: caret };
     setQuery(prev => {
-      if (prev !== q) setSelectedIdx(0);
+      if (prev !== q) setSelectedIdx(firstSelectable());
       return q;
     });
     setPopupOpen(true);
@@ -140,6 +153,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
   }
 
   function insertMention(candidate: MentionCandidate) {
+    if (!candidate.interactable) return;
     const editor = editorRef.current;
     const draft = draftRangeRef.current;
     if (!editor || !draft) return;
@@ -235,12 +249,15 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
     }
     // Enter submits when popup is closed and no IME composition
     if (popupOpen) {
-      if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIdx(i => Math.min(i + 1, filtered.length - 1)); return; }
-      if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIdx(i => Math.max(i - 1, 0)); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIdx(i => nextSelectable(i, 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIdx(i => nextSelectable(i, -1)); return; }
       if (e.key === 'Enter' || e.key === 'Tab') {
-        if (filtered.length > 0) {
+        if (filtered.length > 0 && filtered[selectedIdx]?.interactable) {
           e.preventDefault();
           insertMention(filtered[selectedIdx]);
+        } else if (filtered.length > 0) {
+          // selected item is disabled — eat the key, do nothing
+          e.preventDefault();
         }
         return;
       }
@@ -294,9 +311,11 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
             <button
               key={c.id}
               type="button"
-              onMouseDown={e => { e.preventDefault(); insertMention(c); }}
-              onMouseEnter={() => setSelectedIdx(i)}
-              className={`mention-option ${i === selectedIdx ? 'is-active' : ''}`}
+              disabled={!c.interactable}
+              onMouseDown={e => { e.preventDefault(); if (c.interactable) insertMention(c); }}
+              onMouseEnter={() => { if (c.interactable) setSelectedIdx(i); }}
+              className={`mention-option ${i === selectedIdx && c.interactable ? 'is-active' : ''} ${!c.interactable ? 'is-disabled' : ''}`}
+              title={c.interactable ? '' : '不在当前场景，暂不可互动'}
             >
               <span className={`mention-status-dot ${c.interactable ? 'is-on' : ''}`} aria-hidden />
               <span className="avatar avatar-sm">
@@ -308,6 +327,9 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
               </span>
               {c.kind === 'system' && (
                 <span className="chip" style={{ padding: '1px 8px', fontSize: '0.65rem' }}>不进对话</span>
+              )}
+              {!c.interactable && (
+                <span className="chip" style={{ padding: '1px 8px', fontSize: '0.65rem', opacity: 0.7 }}>不在场</span>
               )}
             </button>
           ))}
