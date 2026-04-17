@@ -10,7 +10,7 @@
  *   4. 全部处理完后做一次小型 LLM 润色，生成统一 title/summary/timeline
  */
 
-import { callLLMBrowser } from './llm-browser';
+import { callLLMBrowser, streamLLMBrowser } from './llm-browser';
 import { LLMConfig, ParsedStory, Character, Location, KeyEvent, WorldSetting } from './types';
 import { v4 as uuid } from 'uuid';
 
@@ -401,30 +401,51 @@ function appendDistinct(existing: string | undefined, incoming: string | undefin
 // Per-chunk parse with cache + retry
 // -----------------------------------------------------------------------------
 
+/**
+ * Heuristic estimate of bytes in the output JSON so we can drive a progress
+ * bar from streamed character counts. Padded high so the bar moves under 1
+ * even when the response is longer than average; we cap at 0.95 to leave room
+ * for the "completion" jump.
+ */
+const EXPECTED_OUTPUT_CHARS = 2200;
+
 async function parseChunkIncremental(
   config: LLMConfig,
   chunk: string,
   chunkIndex: number,
   total: number,
   graph: Graph,
+  onChunkProgress?: (fraction: number) => void,
   onRetry?: (attempt: number) => void,
 ): Promise<ChunkParseResult> {
-  const systemPrompt = chunkIndex === 0 && total === 1
+  const systemPrompt = chunkIndex === 0
     ? INITIAL_PARSE_PROMPT
-    : chunkIndex === 0
-      ? INITIAL_PARSE_PROMPT
-      : buildIncrementalPrompt(graph);
+    : buildIncrementalPrompt(graph);
 
   const userMessage = total > 1
     ? `（这是第 ${chunkIndex + 1}/${total} 段）\n\n${chunk}`
     : chunk;
 
+  const maxTokens = chunkIndex === 0 && total === 1 ? 8192 : 4096;
+
   return withRetry(async () => {
-    const response = await callLLMBrowser(
+    let full = '';
+    let lastReported = 0;
+    for await (const token of streamLLMBrowser(
       config, systemPrompt, userMessage,
-      { temperature: 0.3, maxTokens: chunkIndex === 0 && total === 1 ? 8192 : 4096 },
-    );
-    return JSON.parse(extractJSON(response)) as ChunkParseResult;
+      { temperature: 0.3, maxTokens },
+    )) {
+      full += token;
+      // Throttle callbacks: emit at most every 40 chars to avoid 100s of
+      // React renders per chunk.
+      if (full.length - lastReported >= 40) {
+        lastReported = full.length;
+        const frac = Math.min(0.95, full.length / EXPECTED_OUTPUT_CHARS);
+        onChunkProgress?.(frac);
+      }
+    }
+    onChunkProgress?.(0.98);
+    return JSON.parse(extractJSON(full)) as ChunkParseResult;
   }, MAX_RETRIES, (attempt) => onRetry?.(attempt));
 }
 
@@ -484,6 +505,10 @@ export async function parseStoryClient(
   for (let i = startIndex; i < total; i++) {
     const chunkResult = await parseChunkIncremental(
       config, chunks[i], i, total, graph,
+      (frac) => onProgress?.({
+        phase: 'parse', current: i + frac, total,
+        resumedFrom, characters: graph.characters.length,
+      }),
       (attempt) => onProgress?.({
         phase: 'parse', current: i, total,
         resumedFrom, retrying: attempt, characters: graph.characters.length,
