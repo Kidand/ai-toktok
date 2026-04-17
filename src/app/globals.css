@@ -355,9 +355,10 @@ body {
 .mention-chip {
   display: inline-flex;
   align-items: center;
+  gap: 3px;
   font-family: var(--font-sans);
   font-size: 0.85em;
-  padding: 1px 8px;
+  padding: 1px 4px 1px 8px;
   margin: 0 1px;
   border-radius: 6px;
   background: var(--accent-soft);
@@ -372,6 +373,24 @@ body {
   background: var(--teal-soft);
   color: var(--teal);
   border-color: color-mix(in oklab, var(--teal) 35%, transparent);
+}
+.mention-chip-label { pointer-events: none; }
+.mention-chip-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  font-size: 1.1em;
+  line-height: 1;
+  opacity: 0.5;
+  cursor: pointer;
+  transition: background 0.15s, opacity 0.15s;
+}
+.mention-chip-close:hover {
+  opacity: 1;
+  background: color-mix(in oklab, currentColor 18%, transparent);
 }
 
 .mention-popup {

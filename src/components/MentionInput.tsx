@@ -174,7 +174,65 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
     onChange?.(parseEditor(editor));
   }
 
+  /**
+   * If caret sits at the boundary of a chip and Backspace/Delete is pressed,
+   * the default browser behaviour (contenteditable=false atoms) is
+   * inconsistent — Chromium often no-ops the first keypress. Handle the
+   * boundary case manually so deletion feels direct.
+   */
+  function tryDeleteAdjacentChip(direction: 'backward' | 'forward'): boolean {
+    const editor = editorRef.current;
+    if (!editor) return false;
+    const sel = window.getSelection();
+    if (!sel || !sel.isCollapsed || sel.rangeCount === 0) return false;
+    const range = sel.getRangeAt(0);
+    const node = range.startContainer;
+    const offset = range.startOffset;
+
+    let target: Element | null = null;
+    if (direction === 'backward') {
+      if (node.nodeType === Node.TEXT_NODE && offset === 0) {
+        const prev = node.previousSibling;
+        if (prev && (prev as Element).classList?.contains?.('mention-chip')) target = prev as Element;
+      } else if (node === editor) {
+        const prev = offset > 0 ? editor.childNodes[offset - 1] : null;
+        if (prev && (prev as Element).classList?.contains?.('mention-chip')) target = prev as Element;
+      }
+    } else {
+      if (node.nodeType === Node.TEXT_NODE && offset === (node.textContent?.length || 0)) {
+        const next = node.nextSibling;
+        if (next && (next as Element).classList?.contains?.('mention-chip')) target = next as Element;
+      } else if (node === editor) {
+        const next = editor.childNodes[offset];
+        if (next && (next as Element).classList?.contains?.('mention-chip')) target = next as Element;
+      }
+    }
+    if (!target) return false;
+    target.remove();
+    onChange?.(parseEditor(editor));
+    return true;
+  }
+
+  function handleEditorMouseDown(e: React.MouseEvent<HTMLDivElement>) {
+    const t = e.target as HTMLElement;
+    if (t.classList?.contains('mention-chip-close')) {
+      e.preventDefault();
+      const chip = t.closest('.mention-chip') as HTMLElement | null;
+      const editor = editorRef.current;
+      if (chip && editor && editor.contains(chip)) {
+        chip.remove();
+        editor.focus();
+        onChange?.(parseEditor(editor));
+      }
+    }
+  }
+
   function handleKeyDown(e: ReactKeyboardEvent<HTMLDivElement>) {
+    // Chip boundary deletion (when popup is closed)
+    if (!popupOpen && (e.key === 'Backspace' || e.key === 'Delete')) {
+      const removed = tryDeleteAdjacentChip(e.key === 'Backspace' ? 'backward' : 'forward');
+      if (removed) { e.preventDefault(); return; }
+    }
     // Enter submits when popup is closed and no IME composition
     if (popupOpen) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIdx(i => Math.min(i + 1, filtered.length - 1)); return; }
@@ -207,6 +265,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
         suppressContentEditableWarning
         onInput={handleInput}
         onKeyDown={handleKeyDown}
+        onMouseDown={handleEditorMouseDown}
         onCompositionStart={() => { isComposingRef.current = true; }}
         onCompositionEnd={() => { isComposingRef.current = false; handleInput(); }}
         data-placeholder={placeholder}
@@ -269,7 +328,18 @@ function buildChip(c: MentionCandidate): HTMLSpanElement {
   chip.dataset.mentionId = c.id;
   chip.dataset.mentionName = c.name;
   chip.dataset.mentionKind = c.kind;
-  chip.textContent = `@${c.name}`;
+
+  const label = document.createElement('span');
+  label.className = 'mention-chip-label';
+  label.textContent = `@${c.name}`;
+
+  const close = document.createElement('span');
+  close.className = 'mention-chip-close';
+  close.setAttribute('aria-label', '删除');
+  close.setAttribute('role', 'button');
+  close.textContent = '×';
+
+  chip.append(label, close);
   return chip;
 }
 
@@ -292,7 +362,9 @@ function parseEditor(editor: HTMLDivElement): MentionParsed {
     if (n.nodeType === Node.ELEMENT_NODE) {
       const el = n as HTMLElement;
       if (el.classList?.contains('mention-chip')) {
-        const name = el.dataset.mentionName || el.textContent?.slice(1) || '';
+        const name = el.dataset.mentionName
+          || el.querySelector('.mention-chip-label')?.textContent?.replace(/^@/, '')
+          || '';
         const id = el.dataset.mentionId || '';
         const kind = (el.dataset.mentionKind as 'system' | 'character') || 'character';
         plainText += `@${name}`;
