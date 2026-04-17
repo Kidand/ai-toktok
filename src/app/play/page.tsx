@@ -42,7 +42,7 @@ export default function PlayPage() {
         llmConfig, parsedStory, playerConfig,
         guardrailParams, narrativeBalance,
         narrativeHistory, input,
-        (token) => setStreamingText(prev => prev + token),
+        (narration) => setStreamingText(narration),
       );
       setStreamingText('');
       const result = parseNarrationResponse(raw, parsedStory, input);

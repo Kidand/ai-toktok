@@ -95,6 +95,49 @@ function buildHistoryContext(history: NarrativeEntry[], maxEntries = 20): string
   }).join('\n\n');
 }
 
+/**
+ * Extract the narration field value from a (possibly incomplete) JSON buffer
+ * for streaming display. Handles JSON escape sequences and returns whatever
+ * content is available so far. Returns empty string if the narration key
+ * hasn't been streamed yet.
+ */
+export function extractStreamingNarration(buffer: string): string {
+  const keyMatch = buffer.match(/"narration"\s*:\s*"/);
+  if (!keyMatch || keyMatch.index === undefined) return '';
+  const start = keyMatch.index + keyMatch[0].length;
+  let out = '';
+  let i = start;
+  while (i < buffer.length) {
+    const c = buffer[i];
+    if (c === '\\') {
+      const next = buffer[i + 1];
+      if (next === undefined) break; // incomplete escape, wait for more
+      if (next === 'n') out += '\n';
+      else if (next === 't') out += '\t';
+      else if (next === 'r') out += '\r';
+      else if (next === '"') out += '"';
+      else if (next === '\\') out += '\\';
+      else if (next === '/') out += '/';
+      else if (next === 'b') out += '\b';
+      else if (next === 'f') out += '\f';
+      else if (next === 'u') {
+        if (i + 5 >= buffer.length) break; // incomplete unicode
+        const code = parseInt(buffer.substr(i + 2, 4), 16);
+        if (!Number.isNaN(code)) out += String.fromCharCode(code);
+        i += 6;
+        continue;
+      } else out += next;
+      i += 2;
+    } else if (c === '"') {
+      break; // closing quote — narration complete
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 /** Parse raw LLM JSON response into structured entries */
 export function parseNarrationResponse(raw: string, story: ParsedStory, playerInput: string) {
   let jsonStr = raw;
@@ -131,7 +174,12 @@ export function parseNarrationResponse(raw: string, story: ParsedStory, playerIn
   return { entries, interactions };
 }
 
-/** Stream narration tokens, call onToken for each */
+/**
+ * Stream narration. Calls onNarrationProgress with the cumulative narration
+ * text (extracted from partial JSON) as it streams. Callback is only invoked
+ * when the extracted narration actually changes, so the UI can set it directly
+ * without dedup logic.
+ */
 export async function streamNarrationBrowser(
   config: LLMConfig,
   story: ParsedStory,
@@ -140,7 +188,7 @@ export async function streamNarrationBrowser(
   balance: NarrativeBalance,
   history: NarrativeEntry[],
   playerInput: string,
-  onToken: (token: string) => void,
+  onNarrationProgress: (narrationSoFar: string) => void,
 ): Promise<string> {
   const systemPrompt = buildWorldSystemPrompt(story, playerConfig, guardrail, balance);
   const historyContext = buildHistoryContext(history);
@@ -149,12 +197,17 @@ export async function streamNarrationBrowser(
     : `故事开始。玩家已进入故事世界。\n\n玩家的第一个行动：${playerInput || '（观察周围环境）'}`;
 
   let full = '';
+  let lastEmitted = '';
   for await (const token of streamLLMBrowser(config, systemPrompt, userMessage, {
     temperature: 0.3 + guardrail.temperature * 0.7,
     maxTokens: 4096,
   })) {
     full += token;
-    onToken(token);
+    const narration = extractStreamingNarration(full);
+    if (narration !== lastEmitted) {
+      lastEmitted = narration;
+      onNarrationProgress(narration);
+    }
   }
   return full;
 }
