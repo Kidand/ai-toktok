@@ -175,6 +175,60 @@ export function parseNarrationResponse(raw: string, story: ParsedStory, playerIn
 }
 
 /**
+ * Ask the narrator engine for a short OOC ("out of character") hint.
+ * This is the @system flow — does NOT advance the story, is not recorded in
+ * narrative history, and receives a tightly scoped prompt to avoid spoilers.
+ */
+export async function systemHintBrowser(
+  config: LLMConfig,
+  story: ParsedStory,
+  playerConfig: PlayerConfig,
+  history: NarrativeEntry[],
+  question: string,
+): Promise<string> {
+  const playerChar = playerConfig.entryMode === 'soul-transfer'
+    ? story.characters.find(c => c.id === playerConfig.characterId)
+    : playerConfig.customCharacter;
+
+  const recentContext = history.slice(-6).map(entry => {
+    switch (entry.type) {
+      case 'narration': return `[叙事] ${entry.content}`;
+      case 'dialogue': return `[${entry.speaker}] ${entry.content}`;
+      case 'player-action': return `[玩家] ${entry.content}`;
+      default: return entry.content;
+    }
+  }).join('\n\n');
+
+  const systemPrompt = `你是互动叙事引擎的"系统顾问"，为玩家提供简短的游戏提示。
+
+## 规则
+- 你的回答对剧情透明，不计入对话历史。
+- 回答必须简短（不超过 120 字），直接实用，像一个"小声耳语"。
+- **严禁剧透**：不暴露未来的事件走向、角色秘密、未揭示的真相。
+- 可以做的事：
+  - 提醒玩家当前的场景元素（有哪些人可以交互、有哪些可见的选项）
+  - 解释世界观规则的含义
+  - 给出与剧情目标相关的建议方向（但不指定具体动作）
+  - 澄清玩家之前对话中可能没理解的细节
+- 不要用 JSON 或任何结构化格式，直接用自然语言回答。
+
+## 故事背景
+${story.title} · ${story.worldSetting.era} · ${story.worldSetting.genre}
+
+## 玩家
+${playerChar?.name || '旅人'}（${playerConfig.entryMode === 'soul-transfer' ? '魂穿' : '转生'}）
+
+## 最近的剧情
+${recentContext || '（故事刚开始）'}
+`;
+
+  return callLLMBrowser(config, systemPrompt, question, {
+    temperature: 0.5,
+    maxTokens: 400,
+  });
+}
+
+/**
  * Stream narration. Calls onNarrationProgress with the cumulative narration
  * text (extracted from partial JSON) as it streams. Callback is only invoked
  * when the extracted narration actually changes, so the UI can set it directly
@@ -189,12 +243,16 @@ export async function streamNarrationBrowser(
   history: NarrativeEntry[],
   playerInput: string,
   onNarrationProgress: (narrationSoFar: string) => void,
+  mentionedCharacterNames?: string[],
 ): Promise<string> {
   const systemPrompt = buildWorldSystemPrompt(story, playerConfig, guardrail, balance);
   const historyContext = buildHistoryContext(history);
+  const mentionHint = mentionedCharacterNames && mentionedCharacterNames.length > 0
+    ? `\n\n## 玩家明确指向的对象\n玩家在本次行动中主动面向并互动的角色：${mentionedCharacterNames.join('、')}。请让这些角色在回应中发挥主要作用（如对话、反应）。`
+    : '';
   const userMessage = historyContext
-    ? `## 之前的剧情\n${historyContext}\n\n## 玩家当前行动\n${playerInput}`
-    : `故事开始。玩家已进入故事世界。\n\n玩家的第一个行动：${playerInput || '（观察周围环境）'}`;
+    ? `## 之前的剧情\n${historyContext}\n\n## 玩家当前行动\n${playerInput}${mentionHint}`
+    : `故事开始。玩家已进入故事世界。\n\n玩家的第一个行动：${playerInput || '（观察周围环境）'}${mentionHint}`;
 
   let full = '';
   let lastEmitted = '';
