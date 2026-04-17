@@ -127,7 +127,10 @@ export default function PlayPage() {
       <div className="min-h-screen flex items-center justify-center p-6">
         <div className="text-center">
           <p className="text-muted mb-4">请先完成故事设置</p>
-          <button onClick={() => router.push('/')} className="btn btn-outline">返回首页</button>
+          <div className="flex gap-2 justify-center">
+            <button onClick={() => router.push('/setup')} className="btn btn-primary">返回设置</button>
+            <button onClick={() => router.push('/')} className="btn btn-outline">返回首页</button>
+          </div>
         </div>
       </div>
     );

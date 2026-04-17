@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import {
   GameState, LLMConfig, ParsedStory, PlayerConfig,
   GuardrailParams, NarrativeBalance, NarrativeEntry,
@@ -55,7 +56,9 @@ const initialState: GameState = {
   saves: [],
 };
 
-export const useGameStore = create<GameState & GameActions>((set, get) => ({
+export const useGameStore = create<GameState & GameActions>()(
+  persist(
+    (set, get) => ({
   ...initialState,
 
   init: () => {
@@ -64,6 +67,9 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
     set({
       llmConfig: config as LLMConfig | null,
       saves,
+      // transient flags should never survive a reload
+      isParsing: false,
+      isGenerating: false,
     });
   },
 
@@ -203,4 +209,24 @@ export const useGameStore = create<GameState & GameActions>((set, get) => ({
     llmConfig: get().llmConfig,
     saves: get().saves,
   }),
-}));
+    }),
+    {
+      name: 'ai-toktok-runtime',
+      storage: createJSONStorage(() => localStorage),
+      // Persist only what's needed to survive a reload mid-game. llmConfig and
+      // saves have their own storage keys; isParsing/isGenerating are transient
+      // UI flags.
+      partialize: (state) => ({
+        parsedStory: state.parsedStory,
+        playerConfig: state.playerConfig,
+        guardrailParams: state.guardrailParams,
+        narrativeBalance: state.narrativeBalance,
+        isPlaying: state.isPlaying,
+        narrativeHistory: state.narrativeHistory,
+        characterInteractions: state.characterInteractions,
+        currentSaveId: state.currentSaveId,
+      }),
+      version: 1,
+    },
+  ),
+);
