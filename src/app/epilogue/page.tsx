@@ -6,6 +6,7 @@ import { useGameStore } from '@/store/gameStore';
 import { GameSave, EpilogueEntry } from '@/lib/types';
 import { loadSave } from '@/lib/storage';
 import { generateEpilogueBrowser, type EpilogueStreamState } from '@/lib/narrator-browser';
+import { speakerColor } from '@/components/NarrativeFeed';
 import { ArrowLeft, Book, Sparkles } from '@/components/Icons';
 
 function EpilogueContent() {
@@ -23,7 +24,6 @@ function EpilogueContent() {
   const generationTriggered = useRef(false);
   const { save, epilogue } = data;
 
-  // Load existing epilogue (if any) from save or the store.
   useEffect(() => {
     let loaded: GameSave | null = null;
     if (saveId) {
@@ -41,7 +41,6 @@ function EpilogueContent() {
     }
   }, [saveId]);
 
-  // If we arrived with ?generating=1 and no existing epilogue, run generation.
   useEffect(() => {
     if (generationTriggered.current) return;
     if (!shouldGenerate) return;
@@ -63,7 +62,6 @@ function EpilogueContent() {
         completeGame(result);
         setData(d => ({ ...d, epilogue: result }));
         setStreamState(null);
-        // strip the ?generating=1 so a refresh doesn't retrigger
         router.replace('/epilogue');
       })
       .catch(err => {
@@ -74,7 +72,6 @@ function EpilogueContent() {
   }, [shouldGenerate, epilogue.length, llmConfig, parsedStory, playerConfig,
       narrativeHistory, characterInteractions, completeGame, router]);
 
-  // Once the full epilogue is settled, reveal cards one by one.
   useEffect(() => {
     if (epilogue.length > 0 && visibleCount < epilogue.length) {
       const timer = setTimeout(() => setVisibleCount(prev => prev + 1), 500);
@@ -90,12 +87,11 @@ function EpilogueContent() {
   const isGenerating = !!streamState;
   const hasEpilogue = epilogue.length > 0;
 
-  // Empty fallback when we have no data and aren't actively generating.
   if (!hasEpilogue && !isGenerating && !generateError) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
         <div className="text-center">
-          <p className="text-muted mb-4">暂无后日谈数据</p>
+          <p className="text-[var(--ink-muted)] mb-4 font-mono">暂无后日谈数据</p>
           <button onClick={() => router.push('/')} className="btn btn-outline">返回首页</button>
         </div>
       </div>
@@ -104,44 +100,43 @@ function EpilogueContent() {
 
   return (
     <div className="min-h-screen safe-top pb-12">
-      {/* 顶栏 */}
-      <div className="sticky top-0 z-20 glass border-b px-4 sm:px-6 py-3 flex items-center gap-3">
+      <div className="sticky top-0 z-20 glass px-4 sm:px-6 py-3 flex items-center gap-3">
         <button onClick={() => router.push('/')} className="btn btn-ghost btn-sm" aria-label="返回">
           <ArrowLeft />
         </button>
-        <span className="text-sm text-muted font-sans">后日谈</span>
+        <span className="label-mono">POSTSCRIPT · 后日谈</span>
       </div>
 
       <main className="max-w-3xl mx-auto px-4 sm:px-6">
         {/* 序 */}
-        <header className="text-center py-10 sm:py-16">
-          <Sparkles className="mx-auto mb-4" width={28} height={28} style={{ color: 'var(--accent)' }} />
-          <h1 className="text-3xl sm:text-4xl font-bold mb-4"
-              style={{
-                background: 'linear-gradient(145deg, var(--accent-strong), var(--accent))',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                backgroundClip: 'text',
-              }}>
+        <header className="py-10 sm:py-14">
+          <div className="flex items-center gap-3 mb-4 flex-wrap">
+            <span className="stamp" style={{ transform: 'rotate(-2deg)' }}>END OF RUN</span>
+            <span className="stamp" style={{ transform: 'rotate(1.5deg)', background: 'var(--hi-yellow)' }}>
+              those who remember
+            </span>
+          </div>
+          <h1 className="display text-4xl sm:text-6xl leading-[0.92] mb-5">
             后日谈
           </h1>
-          <p className="text-foreground-soft leading-relaxed">
-            {storyTitle} · {playerChar?.name || '旅人'} 的旅程结束了
-          </p>
-          <p className="text-sm text-muted mt-2 italic">
-            那些与你交错的命运，如今这样回忆着你...
+          <p className="font-serif text-lg text-[var(--ink-soft)] leading-relaxed">
+            <span className="font-sans font-bold">{storyTitle}</span> · {playerChar?.name || '旅人'} 的旅程结束了。
+            <br />
+            那些与你交错的命运，如今这样回忆着你。
           </p>
         </header>
 
-        {/* 生成进度条 */}
+        {/* 生成进度 */}
         {isGenerating && streamState && (
           <EpilogueProgress state={streamState} />
         )}
 
         {/* 错误 */}
         {generateError && (
-          <div className="surface p-5 mb-6" style={{ borderColor: 'color-mix(in oklab, var(--danger) 40%, transparent)' }}>
-            <p className="text-sm mb-3" style={{ color: 'var(--danger)' }}>生成后日谈失败：{generateError}</p>
+          <div className="surface p-5 mb-6" style={{ boxShadow: '4px 4px 0 var(--hi-coral)' }}>
+            <p className="font-mono text-sm mb-3 text-[var(--ink)]">
+              ⚠ 生成后日谈失败：{generateError}
+            </p>
             <div className="flex gap-2">
               <button
                 onClick={() => {
@@ -149,18 +144,19 @@ function EpilogueContent() {
                   setGenerateError(null);
                   router.replace('/epilogue?generating=1');
                 }}
-                className="btn btn-outline btn-sm">重试</button>
+                className="btn btn-primary btn-sm">重试</button>
               <button onClick={() => router.push('/')} className="btn btn-ghost btn-sm">返回首页</button>
             </div>
           </div>
         )}
 
-        {/* 实时流式卡片（生成中） */}
+        {/* 流式中的卡片 */}
         {isGenerating && streamState && streamState.entries.length > 0 && (
-          <section className="space-y-5 mb-8">
+          <section className="space-y-6 mb-8">
             {streamState.entries.map((entry, idx) => (
-              <MemoirCard
+              <MemoirPostcard
                 key={`stream-${idx}`}
+                index={idx}
                 characterName={entry.characterName}
                 memoir={entry.memoir}
                 isPartial={!!entry.partial}
@@ -169,29 +165,30 @@ function EpilogueContent() {
           </section>
         )}
 
-        {/* 已完成的回忆（完整展示阶段） */}
+        {/* 完成后的卡片 */}
         {!isGenerating && hasEpilogue && (
-          <section className="space-y-5">
+          <section className="space-y-6">
             {epilogue.slice(0, visibleCount).map((entry, idx) => (
-              <MemoirCard
+              <MemoirPostcard
                 key={idx}
+                index={idx}
                 characterName={entry.characterName}
                 memoir={entry.memoir}
               />
             ))}
 
             {visibleCount < epilogue.length && (
-              <div className="text-center py-6">
-                <span className="text-muted italic typing-cursor font-sans text-sm">还有角色在回忆中</span>
+              <div className="system-line py-4">
+                <span className="typing-cursor">还有角色在回忆</span>
               </div>
             )}
           </section>
         )}
 
-        {/* 底部操作 */}
+        {/* 底部 */}
         {!isGenerating && hasEpilogue && visibleCount >= epilogue.length && (
-          <footer className="mt-12 pt-8 border-t border-border anim-fade-in">
-            <p className="text-center text-sm text-muted mb-6 italic">所有角色的回忆已经展开</p>
+          <footer className="mt-12 pt-8 border-t-[2.5px] border-[var(--ink)] anim-fade-in">
+            <div className="system-line mb-6">所有角色的回忆已经展开</div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
               <button onClick={() => {
                 useGameStore.getState().resetGame();
@@ -228,37 +225,45 @@ function EpilogueProgress({ state }: { state: EpilogueStreamState }) {
 
   return (
     <div className="surface p-5 mb-6 anim-fade-in">
-      <div className="flex items-center justify-between mb-3 font-sans text-sm">
-        <span className="text-foreground-soft">
-          {completedCount === 0
-            ? '正在召唤各角色的回忆...'
-            : `已完成 ${completedCount} / ${total || '?'} 位`}
+      <div className="flex items-center justify-between mb-3 gap-3">
+        <div>
+          <div className="label-mono">GENERATING</div>
+          <p className="font-sans font-bold text-sm mt-0.5">
+            {completedCount === 0
+              ? '正在召唤各角色的回忆...'
+              : `已完成 ${completedCount} / ${total || '?'} 位`}
+          </p>
+        </div>
+        <span className="font-mono text-lg font-bold tabular-nums bg-[var(--hi-yellow)] border-2 border-[var(--ink)] px-3 py-1" style={{ boxShadow: '2px 2px 0 var(--ink)' }}>
+          {Math.round(pct)}%
         </span>
-        <span className="text-accent tabular-nums text-xs">{Math.round(pct)}%</span>
       </div>
-      <div className="w-full h-1.5 bg-border rounded-full overflow-hidden">
-        <div
-          className="h-full rounded-full transition-all duration-500"
-          style={{ background: 'linear-gradient(90deg, var(--accent-strong), var(--accent))', width: `${pct}%` }}
-        />
+      <div className="ticked-progress">
+        <div className="ticked-progress-fill" style={{ width: `${pct}%` }} />
       </div>
-      <p className="text-xs text-muted-dim mt-2 font-sans">
-        每位角色会基于本次游玩经历以第一人称写下对你的回忆
+      <p className="text-[11px] text-[var(--ink-muted)] mt-2 font-mono">
+        {'// 每位角色基于本次游玩经历以第一人称写下对你的回忆'}
       </p>
     </div>
   );
 }
 
-function MemoirCard({
-  characterName, memoir, isPartial,
-}: { characterName: string; memoir: string; isPartial?: boolean }) {
+function MemoirPostcard({
+  index, characterName, memoir, isPartial,
+}: { index: number; characterName: string; memoir: string; isPartial?: boolean }) {
+  const color = speakerColor(characterName || '');
+  const tiltDeg = [-0.35, 0.25, -0.15, 0.4, -0.3, 0.18][index % 6];
   return (
-    <article className="surface-raised p-5 sm:p-6 anim-slide-up">
-      <div className="flex items-center gap-3 mb-4 pb-3 border-b border-border">
-        <div className="avatar avatar-md">{characterName?.[0] || '?'}</div>
-        <div>
-          <h3 className="font-bold">{characterName || '……'}</h3>
-          <p className="text-xs text-muted font-sans">{isPartial ? '正在写下回忆…' : '的回忆'}</p>
+    <article className="surface-raised p-5 sm:p-6 anim-slide-up"
+             style={{ transform: `rotate(${tiltDeg}deg)` }}>
+      <div className="flex items-start gap-3 mb-4 pb-3 border-b-[2.5px] border-[var(--ink)]">
+        <div className="avatar avatar-lg" data-speaker-color={color}>{characterName?.[0] || '?'}</div>
+        <div className="flex-1 min-w-0">
+          <div className="label-mono mb-1">FROM</div>
+          <h3 className="display text-xl sm:text-2xl truncate">{characterName || '……'}</h3>
+          <p className="text-xs font-mono text-[var(--ink-muted)] mt-0.5">
+            {isPartial ? '// 正在写下回忆…' : '// 的回忆'}
+          </p>
         </div>
       </div>
       <div className="prose-story">
@@ -275,7 +280,7 @@ function MemoirCard({
 
 export default function EpiloguePage() {
   return (
-    <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-muted">加载中...</div>}>
+    <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-[var(--ink-muted)]">加载中...</div>}>
       <EpilogueContent />
     </Suspense>
   );

@@ -4,9 +4,9 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { streamNarrationBrowser, parseNarrationResponse, systemHintBrowser, type StreamingState } from '@/lib/narrator-browser';
-import { NarrativeFeed } from '@/components/NarrativeFeed';
+import { NarrativeFeed, speakerColor } from '@/components/NarrativeFeed';
 import { MentionInput, MentionInputHandle, MentionCandidate, MentionParsed } from '@/components/MentionInput';
-import { ArrowLeft, Users, Send, Close, CheckCircle, Sparkles } from '@/components/Icons';
+import { ArrowLeft, Users, Send, Close, Sparkles } from '@/components/Icons';
 
 const SYSTEM_MENTION_ID = 'system';
 const PRESENCE_WINDOW = 5;
@@ -188,22 +188,25 @@ export default function PlayPage() {
   const canEnd = narrativeHistory.length >= 4;
 
   return (
-    <div className="h-screen flex flex-col bg-background">
+    <div className="h-screen flex flex-col bg-[var(--paper)]">
       {/* 顶栏 */}
-      <header className="glass border-b px-3 sm:px-5 py-3 flex items-center justify-between shrink-0 safe-top">
+      <header className="glass px-3 sm:px-5 py-3 flex items-center justify-between shrink-0 safe-top">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
           <button onClick={() => router.push('/')} className="btn btn-ghost btn-sm" aria-label="返回">
             <ArrowLeft />
           </button>
           <div className="min-w-0">
-            <h1 className="font-bold text-sm truncate" style={{ color: 'var(--accent)' }}>{parsedStory.title}</h1>
-            <p className="text-xs text-muted font-sans truncate">
-              {playerChar?.name || '旅人'} · {playerConfig.entryMode === 'soul-transfer' ? '魂穿' : '转生'}
+            <div className="flex items-center gap-1.5">
+              <span className="label-mono text-[10px]">PLAY ·</span>
+              <h1 className="font-sans font-bold text-sm truncate">{parsedStory.title}</h1>
+            </div>
+            <p className="text-xs text-[var(--ink-muted)] font-mono truncate mt-0.5">
+              {playerChar?.name || '旅人'} · {playerConfig.entryMode === 'soul-transfer' ? 'soul-transfer' : 'reincarnation'} · T{String(narrativeHistory.filter(e => e.type === 'player-action').length).padStart(2, '0')}
             </p>
           </div>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
-          <button onClick={() => setShowSidebar(true)} className="btn btn-ghost btn-sm" aria-label="角色">
+        <div className="flex items-center gap-1.5 shrink-0">
+          <button onClick={() => setShowSidebar(true)} className="btn btn-outline btn-sm" aria-label="角色">
             <Users />
           </button>
           <button onClick={() => setEndConfirm(true)} disabled={isGenerating || !canEnd}
@@ -218,9 +221,7 @@ export default function PlayPage() {
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6">
           {!canEnd && (
-            <p className="text-xs text-muted-dim text-center mb-6 font-sans">
-              故事刚刚开始 · 与世界互动至少 4 次后可结束
-            </p>
+            <div className="system-line mb-6">互动至少 4 次后可结束</div>
           )}
           <NarrativeFeed
             entries={narrativeHistory}
@@ -235,14 +236,17 @@ export default function PlayPage() {
       {/* 选项区 */}
       {lastChoices && lastChoices.length > 0 && !isGenerating && (
         <div className="shrink-0 px-4 sm:px-6 pb-2 anim-fade-in">
-          <div className="max-w-3xl mx-auto flex flex-wrap gap-2">
-            {lastChoices.map(choice => (
-              <button key={choice.id} onClick={() => handleChoice(choice.text)}
-                      className={`chip hover:border-accent transition-colors cursor-pointer ${choice.isBranchPoint ? 'chip-accent branch-marker' : ''}`}
-                      style={{ padding: '6px 12px', fontSize: '0.8rem' }}>
-                {choice.text}
-              </button>
-            ))}
+          <div className="max-w-3xl mx-auto">
+            <div className="label-mono mb-2 text-[10px]">CHOOSE · 或直接打字</div>
+            <div className="flex flex-wrap gap-2">
+              {lastChoices.map(choice => (
+                <button key={choice.id} onClick={() => handleChoice(choice.text)}
+                        className={`btn btn-sm ${choice.isBranchPoint ? 'btn-primary branch-marker pulse-flag' : 'btn-outline'}`}
+                        style={{ fontSize: '0.82rem', paddingLeft: choice.isBranchPoint ? '1.25rem' : undefined }}>
+                  {choice.text}
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       )}
@@ -256,12 +260,12 @@ export default function PlayPage() {
                 <Close width={14} height={14} />
               </button>
               <div className="system-hint-header">
-                <Sparkles width={12} height={12} /> 系统提示 · 不计入对话
+                <Sparkles width={12} height={12} /> 系统耳语 · 不计入对话
               </div>
               <div className="system-hint-body">
-                {systemHint.loading ? (
-                  <span className="text-muted italic typing-cursor">正在查询</span>
-                ) : systemHint.answer}
+                {systemHint.loading
+                  ? <span className="text-[var(--ink-muted)] italic typing-cursor">正在查询</span>
+                  : systemHint.answer}
               </div>
             </div>
           </div>
@@ -269,12 +273,12 @@ export default function PlayPage() {
       )}
 
       {/* 输入区 */}
-      <div className="glass border-t shrink-0 px-3 sm:px-5 py-3 pb-safe">
+      <div className="shrink-0 border-t-[2.5px] border-[var(--ink)] bg-[var(--paper-raised)] px-3 sm:px-5 py-3 pb-safe">
         <div className="max-w-3xl mx-auto flex gap-2 items-end">
           <MentionInput
             ref={inputRef}
             candidates={mentionCandidates}
-            placeholder={isGenerating ? '角色正在响应...' : '你想做什么... (输入 @ 与角色互动 / 咨询系统)'}
+            placeholder={isGenerating ? '角色正在响应...' : '你想做什么…  (@ 唤出角色 / 系统)'}
             disabled={isGenerating}
             onSubmit={handleSubmit}
           />
@@ -291,20 +295,23 @@ export default function PlayPage() {
         </div>
       </div>
 
-      {/* 角色侧栏 / 底部抽屉 */}
+      {/* 角色侧栏 */}
       {showSidebar && (
         <>
-          <div className="fixed inset-0 bg-black/50 z-40 anim-fade-in" onClick={() => setShowSidebar(false)} />
-          <aside className="fixed z-50 anim-slide-up surface-raised overflow-hidden flex flex-col
-                            right-0 top-0 bottom-0 w-full sm:w-80 sm:border-l
-                            rounded-none">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-              <h2 className="font-bold">角色</h2>
+          <div className="fixed inset-0 bg-[rgba(17,17,17,0.5)] z-40 anim-fade-in" onClick={() => setShowSidebar(false)} />
+          <aside className="fixed z-50 anim-slide-up bg-[var(--paper)] overflow-hidden flex flex-col
+                            right-0 top-0 bottom-0 w-full sm:w-[320px]"
+                 style={{ borderLeft: '2.5px solid var(--ink)' }}>
+            <div className="flex items-center justify-between px-4 py-3 border-b-[2.5px] border-[var(--ink)] bg-[var(--paper-raised)]">
+              <div>
+                <div className="label-mono text-[10px]">CAST</div>
+                <h2 className="font-sans font-bold text-base">角色名册</h2>
+              </div>
               <button onClick={() => setShowSidebar(false)} className="btn btn-ghost btn-sm" aria-label="关闭">
                 <Close />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+            <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
               {parsedStory.characters.map(char => {
                 const interaction = characterInteractions.find(ci => ci.characterId === char.id);
                 const isPlayer = char.id === playerConfig.characterId;
@@ -312,21 +319,22 @@ export default function PlayPage() {
                 return (
                   <div key={char.id} className="surface p-3 flex gap-3">
                     <div className="relative">
-                      <div className="avatar avatar-sm">{char.name[0]}</div>
+                      <div className="avatar avatar-md" data-speaker-color={isPlayer ? 'yellow' : speakerColor(char.name)}>{char.name[0]}</div>
                       {!isPlayer && (
                         <span className={`mention-status-dot ${isPresent ? 'is-on' : ''}`}
-                              style={{ position: 'absolute', bottom: -1, right: -1, border: '2px solid var(--surface-1)', width: 10, height: 10 }} />
+                              style={{ position: 'absolute', bottom: -3, right: -3, width: 12, height: 12 }} />
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <div className="font-medium text-sm flex items-center gap-2">
+                      <div className="font-sans font-bold text-sm flex items-center gap-2">
                         <span className="truncate">{char.name}</span>
-                        {isPlayer && <span className="chip chip-accent" style={{ padding: '1px 6px', fontSize: '0.65rem' }}>你</span>}
+                        {isPlayer && <span className="chip chip-accent" style={{ padding: '1px 6px', fontSize: '0.62rem' }}>YOU</span>}
                       </div>
-                      <p className="text-xs text-muted mt-1 line-clamp-2">{char.personality}</p>
+                      <p className="text-xs text-[var(--ink-muted)] mt-1 line-clamp-2 font-serif">{char.personality}</p>
                       {interaction && interaction.interactions.length > 0 && (
-                        <p className="text-xs mt-1.5 font-sans" style={{ color: 'var(--teal)' }}>
-                          {interaction.interactions.length} 次互动
+                        <p className="text-[11px] mt-1.5 font-mono">
+                          <span className="text-[var(--ink-muted)]">interactions · </span>
+                          <span className="font-bold text-[var(--ink)]">{interaction.interactions.length}</span>
                         </p>
                       )}
                     </div>
@@ -340,17 +348,19 @@ export default function PlayPage() {
 
       {/* 结束确认 */}
       {endConfirm && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 anim-fade-in"
+        <div className="fixed inset-0 z-50 bg-[rgba(17,17,17,0.55)] flex items-center justify-center p-4 anim-fade-in"
              onClick={() => setEndConfirm(false)}>
           <div className="surface-raised max-w-sm w-full p-6" onClick={e => e.stopPropagation()}>
-            <CheckCircle className="mx-auto mb-3" style={{ color: 'var(--accent)' }} width={32} height={32} />
-            <h3 className="text-lg font-bold text-center mb-2">确认结束故事？</h3>
-            <p className="text-sm text-muted text-center mb-5 font-sans">
-              AI 将根据你与各角色的互动生成后日谈，<br />结束后故事不可再继续。
+            <div className="stamp mb-3 mx-auto" style={{ transform: 'rotate(-2deg)', width: 'fit-content' }}>
+              END OF STORY?
+            </div>
+            <h3 className="display text-2xl text-center mb-3">确认结束这次游玩？</h3>
+            <p className="font-serif text-sm text-[var(--ink-soft)] text-center mb-5">
+              AI 将根据你与各角色的互动生成一份后日谈。<br />结束后这次故事不可再继续。
             </p>
             <div className="grid grid-cols-2 gap-2">
               <button onClick={() => setEndConfirm(false)} className="btn btn-outline">取消</button>
-              <button onClick={handleEndStory} className="btn btn-primary">生成后日谈</button>
+              <button onClick={handleEndStory} className="btn btn-coral">生成后日谈 →</button>
             </div>
           </div>
         </div>
