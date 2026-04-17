@@ -23,7 +23,7 @@ export default function HomePage() {
   const [storyText, setStoryText] = useState('');
   const [fileName, setFileName] = useState('');
   const [error, setError] = useState('');
-  const [parseProgress, setParseProgress] = useState<{ phase: string; current: number; total: number; cached?: number; retrying?: number }>({ phase: '', current: 0, total: 0 });
+  const [parseProgress, setParseProgress] = useState<{ phase: string; current: number; total: number; resumedFrom?: number; retrying?: number; characters?: number }>({ phase: '', current: 0, total: 0 });
   const [tab, setTab] = useState<'new' | 'saves'>('new');
   const [showApiDetails, setShowApiDetails] = useState(false);
 
@@ -98,10 +98,9 @@ export default function HomePage() {
     );
   }
 
-  const progressPct = parseProgress.phase === 'split' ? 5
-    : parseProgress.phase === 'parse' ? Math.max(10, (parseProgress.current / Math.max(1, parseProgress.total)) * 75)
-    : parseProgress.phase === 'merge' ? 82
-    : parseProgress.phase === 'polish' ? 92
+  const progressPct = parseProgress.phase === 'split' ? 3
+    : parseProgress.phase === 'parse' ? Math.max(5, (parseProgress.current / Math.max(1, parseProgress.total)) * 88)
+    : parseProgress.phase === 'polish' ? 94
     : parseProgress.phase === 'build' ? 100
     : 0;
 
@@ -236,16 +235,20 @@ export default function HomePage() {
                     {parseProgress.phase === 'parse' && (
                       parseProgress.total === 1
                         ? '正在解析故事...'
-                        : `并行解析 ${parseProgress.current}/${parseProgress.total} 段`
+                        : `增量解析 ${parseProgress.current}/${parseProgress.total} 段`
                     )}
-                    {parseProgress.phase === 'merge' && '正在合并结构...'}
-                    {parseProgress.phase === 'polish' && '正在生成概要...'}
+                    {parseProgress.phase === 'polish' && '正在生成统一概要...'}
                     {parseProgress.phase === 'build' && '正在构建故事世界...'}
                   </span>
                   <div className="flex items-center gap-2 shrink-0">
-                    {parseProgress.phase === 'parse' && parseProgress.cached! > 0 && (
+                    {parseProgress.phase === 'parse' && parseProgress.characters !== undefined && parseProgress.characters > 0 && (
+                      <span className="chip" style={{ padding: '2px 8px' }}>
+                        {parseProgress.characters} 角色
+                      </span>
+                    )}
+                    {parseProgress.resumedFrom !== undefined && (
                       <span className="chip chip-teal" style={{ padding: '2px 8px' }}>
-                        缓存 {parseProgress.cached}
+                        从第 {parseProgress.resumedFrom} 段续传
                       </span>
                     )}
                     {parseProgress.retrying && (
@@ -262,7 +265,7 @@ export default function HomePage() {
                 </div>
                 {parseProgress.phase === 'parse' && parseProgress.total > 1 && (
                   <p className="text-xs text-muted-dim font-sans mt-1">
-                    失败的片段会自动重试 · 成功片段已缓存，重试时不会重算
+                    每段在前序图谱基础上增量合并 · 失败自动重试，已完成片段会缓存，重跑可续传
                   </p>
                 )}
               </div>
