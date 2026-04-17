@@ -447,11 +447,75 @@ function sentimentLabel(s: string): string {
   return '中立';
 }
 
+/** One in-flight or completed epilogue entry as the stream progresses. */
+export type EpilogueStreamEntry = {
+  characterName: string;
+  memoir: string;
+  /** True when the object is not yet closed in the JSON stream. */
+  partial?: boolean;
+};
+export type EpilogueStreamState = {
+  /** Fully formed memoirs emitted by the model so far. */
+  entries: EpilogueStreamEntry[];
+  /** Total expected (helps the UI draw a determinate progress bar). */
+  expectedCount: number;
+};
+
+/**
+ * Extract memoirs from a streaming JSON array buffer. Reuses the same
+ * balanced-object walker as the dialogue streamer. The final partial object
+ * (if any) surfaces as an entry with `partial: true` so the UI can render
+ * its characterName while the memoir text is still being written.
+ */
+function extractStreamingEpilogue(buffer: string, expectedCount: number): EpilogueStreamState {
+  const entries: EpilogueStreamEntry[] = [];
+
+  // Find the first '[' (optionally preceded by ```json)
+  const arrStart = buffer.indexOf('[');
+  if (arrStart < 0) return { entries, expectedCount };
+
+  let i = arrStart + 1;
+  while (i < buffer.length) {
+    while (i < buffer.length && /[\s,]/.test(buffer[i])) i++;
+    if (i >= buffer.length) break;
+    if (buffer[i] === ']') break;
+    if (buffer[i] !== '{') break;
+
+    const complete = tryParseBalancedObject(buffer, i);
+    if (complete) {
+      const val = complete.value as { characterName?: string; memoir?: string };
+      if (val.characterName || val.memoir) {
+        entries.push({ characterName: val.characterName || '', memoir: val.memoir || '' });
+      }
+      i = complete.endIdx;
+    } else {
+      // Partial trailing memoir — pull whatever fields have started.
+      const slice = buffer.slice(i);
+      const nameKey = slice.match(/"characterName"\s*:\s*"/);
+      const memoirKey = slice.match(/"memoir"\s*:\s*"/);
+      const name = nameKey && nameKey.index !== undefined
+        ? decodePartialJSONString(slice, nameKey.index + nameKey[0].length).value
+        : '';
+      const memoir = memoirKey && memoirKey.index !== undefined
+        ? decodePartialJSONString(slice, memoirKey.index + memoirKey[0].length).value
+        : '';
+      if (name || memoir) {
+        entries.push({ characterName: name, memoir, partial: true });
+      }
+      break;
+    }
+  }
+  return { entries, expectedCount };
+}
+
 /**
  * Generate per-character memoirs grounded in the actual playthrough. Each
  * character's section gets their personality, full interaction log, and the
  * complete playthrough transcript so the model writes from concrete lived
  * events rather than echoing the source material.
+ *
+ * Streams each memoir as it completes via `onProgress`, enabling a
+ * determinate progress bar and incremental card reveal.
  */
 export async function generateEpilogueBrowser(
   config: LLMConfig,
@@ -459,6 +523,7 @@ export async function generateEpilogueBrowser(
   playerConfig: PlayerConfig,
   characterInteractions: { characterId: string; characterName: string; interactions: { event: string; playerAction: string; characterReaction: string; sentiment: string }[] }[],
   narrativeHistory: NarrativeEntry[],
+  onProgress?: (state: EpilogueStreamState) => void,
 ): Promise<{ characterId: string; characterName: string; memoir: string }[]> {
   const playerChar = playerConfig.entryMode === 'soul-transfer'
     ? story.characters.find(c => c.id === playerConfig.characterId)
@@ -543,12 +608,27 @@ ${transcript}
 
 请基于上面这次独有的游玩记录，为每位角色写一段第一人称的回忆。`;
 
-  const response = await callLLMBrowser(config, systemPrompt, userMessage, {
+  const expectedCount = participants.length;
+  let full = '';
+  let lastSig = '';
+  if (onProgress) onProgress({ entries: [], expectedCount });
+  for await (const token of streamLLMBrowser(config, systemPrompt, userMessage, {
     temperature: 0.7,
     maxTokens: 4096,
-  });
-  let jsonStr = response;
-  const m = response.match(/```(?:json)?\s*([\s\S]*?)```/);
+  })) {
+    full += token;
+    if (onProgress) {
+      const state = extractStreamingEpilogue(full, expectedCount);
+      const sig = state.entries.map(e => `${e.partial ? 'P' : 'F'}|${e.characterName}|${e.memoir.length}`).join('/');
+      if (sig !== lastSig) {
+        lastSig = sig;
+        onProgress(state);
+      }
+    }
+  }
+
+  let jsonStr = full;
+  const m = full.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (m) jsonStr = m[1];
   const parsed: { characterName: string; memoir: string }[] = JSON.parse(jsonStr.trim());
   return parsed.map(p => {

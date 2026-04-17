@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
-import { streamNarrationBrowser, parseNarrationResponse, generateEpilogueBrowser, systemHintBrowser, type StreamingState } from '@/lib/narrator-browser';
+import { streamNarrationBrowser, parseNarrationResponse, systemHintBrowser, type StreamingState } from '@/lib/narrator-browser';
 import { NarrativeFeed } from '@/components/NarrativeFeed';
 import { MentionInput, MentionInputHandle, MentionCandidate, MentionParsed } from '@/components/MentionInput';
 import { ArrowLeft, Users, Send, Close, CheckCircle, Sparkles } from '@/components/Icons';
@@ -17,7 +17,7 @@ export default function PlayPage() {
     parsedStory, playerConfig, llmConfig, isPlaying,
     narrativeHistory, guardrailParams, narrativeBalance,
     addNarrativeEntries, addPlayerAction, addCharacterInteractions,
-    autoSave, completeGame, setIsGenerating, isGenerating,
+    autoSave, setIsGenerating, isGenerating,
     characterInteractions,
   } = useGameStore();
 
@@ -175,19 +175,13 @@ export default function PlayPage() {
     streamNarrate('narrate', choiceText, undefined, true);
   };
 
-  const handleEndStory = async () => {
+  const handleEndStory = () => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
     setEndConfirm(false);
-    setIsGenerating(true);
-    try {
-      const epilogue = await generateEpilogueBrowser(llmConfig, parsedStory, playerConfig, characterInteractions, narrativeHistory);
-      completeGame(epilogue);
-      router.push('/epilogue');
-    } catch (err) {
-      console.error('生成后日谈失败:', err);
-    } finally {
-      setIsGenerating(false);
-    }
+    // Navigate to the epilogue page immediately; it will run generation
+    // itself and stream results with a progress bar, so the user doesn't
+    // sit on the play screen watching a disabled button.
+    router.push('/epilogue?generating=1');
   };
 
   const lastChoices = [...narrativeHistory].reverse().find(e => e.choices?.length)?.choices;
