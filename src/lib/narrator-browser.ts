@@ -12,6 +12,7 @@ function buildWorldSystemPrompt(
   playerConfig: PlayerConfig,
   guardrail: GuardrailParams,
   balance: NarrativeBalance,
+  isOpening?: boolean,
 ): string {
   const playerChar = playerConfig.entryMode === 'soul-transfer'
     ? story.characters.find(c => c.id === playerConfig.characterId)
@@ -66,7 +67,13 @@ ${strictnessGuide}
 
 ## 叙事风格
 ${narrativeGuide}
-
+${isOpening ? `
+## 开场特别规则（仅限本次）
+这是故事开场，玩家尚未发言或主动行动——他刚刚来到这个世界，只是在感受周围。
+**本次回复中 ${playerChar?.name || '主角'} 不能开口说话**（dialogues 数组不得包含 speaker = "${playerChar?.name || '主角'}" 的条目）。
+你可以用 narration 描写他/她的视角、所见所感、内心活动，但不要代他/她说话或做自我介绍。
+其他 NPC 可以正常出现、行动、说话。从下一回合起此限制取消。
+` : ''}
 ## 剧情推进要求（必须遵守）
 每次回复都要让故事实质前进，不能原地踏步。具体要求：
 - 至少发生一件**具体的事**：角色采取行动、揭示新信息、环境/时间变化、人物关系变化、新角色登场或离场
@@ -364,8 +371,9 @@ export async function streamNarrationBrowser(
   onStreamProgress: (state: StreamingState) => void,
   mentionedCharacterNames?: string[],
   fromChoice?: boolean,
+  isOpening?: boolean,
 ): Promise<string> {
-  const systemPrompt = buildWorldSystemPrompt(story, playerConfig, guardrail, balance);
+  const systemPrompt = buildWorldSystemPrompt(story, playerConfig, guardrail, balance, isOpening);
   const historyContext = buildHistoryContext(history);
   const mentionHint = mentionedCharacterNames && mentionedCharacterNames.length > 0
     ? `\n\n## 玩家明确指向的对象\n玩家在本次行动中主动面向并互动的角色：${mentionedCharacterNames.join('、')}。请让这些角色在回应中发挥主要作用（如对话、反应）。`
