@@ -40,9 +40,16 @@ export const Users = (p: IconProps) => (
   </svg>
 );
 
+/**
+ * A solid four-pointed sparkle glyph. Previously this was a radiating line
+ * pattern that looked too much like an activity spinner — users read it as
+ * "loading" even when the UI was idle. This filled shape reads as "special
+ * / magical" instantly, which is what every caller (preset tab, system
+ * whisper, epilogue back-to-home) actually wants.
+ */
 export const Sparkles = (p: IconProps) => (
-  <svg {...base} {...p}>
-    <path d="M12 3v4M12 17v4M3 12h4M17 12h4M5.6 5.6l2.8 2.8M15.6 15.6l2.8 2.8M5.6 18.4l2.8-2.8M15.6 8.4l2.8-2.8" />
+  <svg {...base} fill="currentColor" stroke="none" {...p}>
+    <path d="M12 2.5 L13.6 10.4 L21.5 12 L13.6 13.6 L12 21.5 L10.4 13.6 L2.5 12 L10.4 10.4 Z" />
   </svg>
 );
 
