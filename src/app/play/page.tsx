@@ -86,8 +86,7 @@ export default function PlayPage() {
     if (!llmConfig || !parsedStory || !playerConfig) return;
     setIsGenerating(true);
     setStreamingState({ narration: '', dialogues: [] });
-    const isOpening = action === 'opening';
-    const input = isOpening ? '（我刚刚来到这个世界，环顾四周）' : (playerInput || '');
+    const input = action === 'opening' ? '（我刚刚来到这个世界，环顾四周）' : (playerInput || '');
     try {
       const raw = await streamNarrationBrowser(
         llmConfig, parsedStory, playerConfig,
@@ -96,7 +95,6 @@ export default function PlayPage() {
         (state) => setStreamingState(state),
         mentionedNames,
         fromChoice,
-        isOpening,
       );
       setStreamingState({ narration: '', dialogues: [] });
       const result = parseNarrationResponse(raw, parsedStory, input);
