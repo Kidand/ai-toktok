@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
-import { streamNarrationBrowser, parseNarrationResponse, generateEpilogueBrowser, systemHintBrowser } from '@/lib/narrator-browser';
+import { streamNarrationBrowser, parseNarrationResponse, generateEpilogueBrowser, systemHintBrowser, type StreamingState } from '@/lib/narrator-browser';
 import { NarrativeFeed } from '@/components/NarrativeFeed';
 import { MentionInput, MentionInputHandle, MentionCandidate, MentionParsed } from '@/components/MentionInput';
 import { ArrowLeft, Users, Send, Close, CheckCircle, Sparkles } from '@/components/Icons';
@@ -22,7 +22,7 @@ export default function PlayPage() {
   } = useGameStore();
 
   const [showSidebar, setShowSidebar] = useState(false);
-  const [streamingText, setStreamingText] = useState('');
+  const [streamingState, setStreamingState] = useState<StreamingState>({ narration: '', dialogues: [] });
   const [endConfirm, setEndConfirm] = useState(false);
   const [systemHint, setSystemHint] = useState<{ question: string; answer: string; loading: boolean } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -32,7 +32,7 @@ export default function PlayPage() {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [narrativeHistory, streamingText, systemHint]);
+  }, [narrativeHistory, streamingState, systemHint]);
 
   const playerChar = useMemo(() => {
     if (!parsedStory || !playerConfig) return undefined;
@@ -85,18 +85,18 @@ export default function PlayPage() {
   ) => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
     setIsGenerating(true);
-    setStreamingText('');
+    setStreamingState({ narration: '', dialogues: [] });
     const input = action === 'opening' ? '（我刚刚来到这个世界，环顾四周）' : (playerInput || '');
     try {
       const raw = await streamNarrationBrowser(
         llmConfig, parsedStory, playerConfig,
         guardrailParams, narrativeBalance,
         narrativeHistory, input,
-        (narration) => setStreamingText(narration),
+        (state) => setStreamingState(state),
         mentionedNames,
         fromChoice,
       );
-      setStreamingText('');
+      setStreamingState({ narration: '', dialogues: [] });
       const result = parseNarrationResponse(raw, parsedStory, input);
       addNarrativeEntries(result.entries);
       if (result.interactions?.length) {
@@ -107,7 +107,7 @@ export default function PlayPage() {
       console.error('叙事生成失败:', err);
     } finally {
       setIsGenerating(false);
-      setStreamingText('');
+      setStreamingState({ narration: '', dialogues: [] });
     }
   }, [llmConfig, parsedStory, playerConfig, guardrailParams, narrativeBalance, narrativeHistory, addNarrativeEntries, addCharacterInteractions, autoSave, setIsGenerating]);
 
@@ -228,7 +228,8 @@ export default function PlayPage() {
           <NarrativeFeed
             entries={narrativeHistory}
             playerName={playerChar?.name}
-            streamingText={streamingText}
+            streamingNarration={streamingState.narration}
+            streamingDialogues={streamingState.dialogues}
             isGenerating={isGenerating}
           />
         </div>

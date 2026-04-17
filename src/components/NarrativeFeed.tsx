@@ -1,34 +1,82 @@
 import { NarrativeEntry } from '@/lib/types';
+import type { StreamingDialogue } from '@/lib/narrator-browser';
 
 type Props = {
   entries: NarrativeEntry[];
   playerName?: string;
-  streamingText?: string;
+  streamingNarration?: string;
+  streamingDialogues?: StreamingDialogue[];
   isGenerating?: boolean;
 };
 
-export function NarrativeFeed({ entries, playerName, streamingText, isGenerating }: Props) {
+export function NarrativeFeed({
+  entries, playerName, streamingNarration, streamingDialogues, isGenerating,
+}: Props) {
+  const hasStreaming = isGenerating && (
+    (streamingNarration && streamingNarration.length > 0) ||
+    (streamingDialogues && streamingDialogues.length > 0)
+  );
+  const narrationDone = !!(streamingDialogues && streamingDialogues.length > 0);
+
   return (
     <div className="space-y-5">
       {entries.map(entry => (
         <NarrativeBlock key={entry.id} entry={entry} playerName={playerName} />
       ))}
-      {isGenerating && (
+      {isGenerating && !hasStreaming && (
         <div className="anim-fade-in prose-story">
-          {streamingText ? (
-            streamingText.split('\n').map((line, i, arr) => (
-              <p key={i}>
-                {line}
-                {i === arr.length - 1 && <span className="typing-cursor" />}
-              </p>
-            ))
-          ) : (
-            <p className="text-muted italic">
-              <span className="typing-cursor">正在书写</span>
-            </p>
-          )}
+          <p className="text-muted italic">
+            <span className="typing-cursor">正在书写</span>
+          </p>
         </div>
       )}
+      {hasStreaming && streamingNarration && (
+        <div className="anim-fade-in prose-story">
+          {streamingNarration.split('\n').map((line, i, arr) => (
+            <p key={i}>
+              {line}
+              {i === arr.length - 1 && !narrationDone && <span className="typing-cursor" />}
+            </p>
+          ))}
+        </div>
+      )}
+      {hasStreaming && streamingDialogues && streamingDialogues.map((d, i) => (
+        <StreamingDialogueBubble
+          key={`s-${i}`}
+          dialogue={d}
+          playerName={playerName}
+          isLastAndPartial={i === streamingDialogues.length - 1 && !!d.partial}
+        />
+      ))}
+    </div>
+  );
+}
+
+function StreamingDialogueBubble({
+  dialogue, playerName, isLastAndPartial,
+}: { dialogue: StreamingDialogue; playerName?: string; isLastAndPartial: boolean }) {
+  const isPlayer = dialogue.speaker === playerName;
+  return (
+    <div className={`anim-fade-in flex gap-3 items-start ${isPlayer ? 'flex-row-reverse' : ''}`}>
+      <div className="avatar avatar-sm" aria-hidden>{dialogue.speaker?.[0] || '?'}</div>
+      <div className={`max-w-[80%] ${isPlayer ? 'text-right' : ''}`}>
+        <div className={`text-xs mb-1 font-sans ${isPlayer ? 'text-accent' : 'text-muted'}`}>
+          {dialogue.speaker || '…'}
+        </div>
+        <div
+          className={`inline-block text-left rounded-2xl px-4 py-2.5 leading-relaxed ${
+            isPlayer
+              ? 'bg-accent text-[#1a1208] font-medium'
+              : 'bg-surface-2 border border-border text-foreground-soft'
+          }`}
+          style={isPlayer ? { background: 'linear-gradient(140deg, var(--accent-strong), var(--accent))' } : undefined}
+        >
+          {dialogue.content ? `"${dialogue.content}` : ''}
+          {isLastAndPartial && <span className="typing-cursor" />}
+          {dialogue.content && !isLastAndPartial && '"'}
+          {!dialogue.content && isLastAndPartial && <span className="text-muted italic" style={{ fontSize: '0.85em' }}>（正在开口…）</span>}
+        </div>
+      </div>
     </div>
   );
 }

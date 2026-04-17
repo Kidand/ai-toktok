@@ -115,15 +115,12 @@ function buildHistoryContext(history: NarrativeEntry[], maxEntries = 20): string
 }
 
 /**
- * Extract the narration field value from a (possibly incomplete) JSON buffer
- * for streaming display. Handles JSON escape sequences and returns whatever
- * content is available so far. Returns empty string if the narration key
- * hasn't been streamed yet.
+ * Decode a (possibly partial) JSON string literal's body — the text between
+ * the opening and closing quotes, minus the quotes themselves. Stops at the
+ * first unescaped `"` (considered the closing quote) or at buffer exhaustion.
+ * Returns the decoded text and the index of the first unconsumed char.
  */
-export function extractStreamingNarration(buffer: string): string {
-  const keyMatch = buffer.match(/"narration"\s*:\s*"/);
-  if (!keyMatch || keyMatch.index === undefined) return '';
-  const start = keyMatch.index + keyMatch[0].length;
+function decodePartialJSONString(buffer: string, start: number): { value: string; endIdx: number } {
   let out = '';
   let i = start;
   while (i < buffer.length) {
@@ -140,7 +137,7 @@ export function extractStreamingNarration(buffer: string): string {
       else if (next === 'b') out += '\b';
       else if (next === 'f') out += '\f';
       else if (next === 'u') {
-        if (i + 5 >= buffer.length) break; // incomplete unicode
+        if (i + 5 >= buffer.length) break;
         const code = parseInt(buffer.substr(i + 2, 4), 16);
         if (!Number.isNaN(code)) out += String.fromCharCode(code);
         i += 6;
@@ -148,13 +145,116 @@ export function extractStreamingNarration(buffer: string): string {
       } else out += next;
       i += 2;
     } else if (c === '"') {
-      break; // closing quote — narration complete
+      return { value: out, endIdx: i };
     } else {
       out += c;
       i++;
     }
   }
-  return out;
+  return { value: out, endIdx: i };
+}
+
+/**
+ * Extract the narration field value from a (possibly incomplete) JSON buffer
+ * for streaming display.
+ */
+export function extractStreamingNarration(buffer: string): string {
+  const keyMatch = buffer.match(/"narration"\s*:\s*"/);
+  if (!keyMatch || keyMatch.index === undefined) return '';
+  return decodePartialJSONString(buffer, keyMatch.index + keyMatch[0].length).value;
+}
+
+export type StreamingDialogue = { speaker: string; content: string; partial?: boolean };
+export type StreamingState = {
+  narration: string;
+  dialogues: StreamingDialogue[];
+};
+
+/**
+ * Scan a buffer position for a balanced JSON object `{...}`. Returns the
+ * parsed object and the index just after `}` if complete, or null if the
+ * object is not yet closed.
+ */
+function tryParseBalancedObject(buffer: string, start: number): { value: Record<string, unknown>; endIdx: number } | null {
+  if (buffer[start] !== '{') return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < buffer.length; i++) {
+    const c = buffer[i];
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) {
+        try {
+          return { value: JSON.parse(buffer.slice(start, i + 1)), endIdx: i + 1 };
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Pull speaker + content from an open (unclosed) dialogue object at
+ * `objStart`. Returns null if neither field has started yet.
+ */
+function extractPartialDialogue(buffer: string, objStart: number): StreamingDialogue | null {
+  const slice = buffer.slice(objStart);
+  const speakerKey = slice.match(/"speaker"\s*:\s*"/);
+  const contentKey = slice.match(/"content"\s*:\s*"/);
+  const speaker = speakerKey && speakerKey.index !== undefined
+    ? decodePartialJSONString(slice, speakerKey.index + speakerKey[0].length).value
+    : '';
+  const content = contentKey && contentKey.index !== undefined
+    ? decodePartialJSONString(slice, contentKey.index + contentKey[0].length).value
+    : '';
+  if (!speaker && !content) return null;
+  return { speaker, content, partial: true };
+}
+
+/**
+ * Extract narration + all dialogues (completed + partial last) from a
+ * streaming JSON buffer. Designed for incremental UI rendering.
+ */
+export function extractStreamingState(buffer: string): StreamingState {
+  const narration = extractStreamingNarration(buffer);
+  const dialogues: StreamingDialogue[] = [];
+
+  const arrMatch = buffer.match(/"dialogues"\s*:\s*\[/);
+  if (!arrMatch || arrMatch.index === undefined) return { narration, dialogues };
+
+  let i = arrMatch.index + arrMatch[0].length;
+  while (i < buffer.length) {
+    while (i < buffer.length && /[\s,]/.test(buffer[i])) i++;
+    if (i >= buffer.length) break;
+    if (buffer[i] === ']') break;
+    if (buffer[i] !== '{') break;
+
+    const complete = tryParseBalancedObject(buffer, i);
+    if (complete) {
+      const val = complete.value as { speaker?: string; content?: string };
+      if (val.speaker || val.content) {
+        dialogues.push({ speaker: val.speaker || '', content: val.content || '' });
+      }
+      i = complete.endIdx;
+    } else {
+      // Partial trailing dialogue — show what we have and stop.
+      const partial = extractPartialDialogue(buffer, i);
+      if (partial && (partial.content || partial.speaker)) dialogues.push(partial);
+      break;
+    }
+  }
+  return { narration, dialogues };
 }
 
 /** Parse raw LLM JSON response into structured entries */
@@ -248,10 +348,10 @@ ${recentContext || '（故事刚开始）'}
 }
 
 /**
- * Stream narration. Calls onNarrationProgress with the cumulative narration
- * text (extracted from partial JSON) as it streams. Callback is only invoked
- * when the extracted narration actually changes, so the UI can set it directly
- * without dedup logic.
+ * Stream narration + dialogues. onStreamProgress fires whenever the extracted
+ * state materially changes (new narration text, a dialogue completes, or the
+ * partial last dialogue grows). The UI can replace its displayed state
+ * wholesale on each callback without tracking deltas.
  */
 export async function streamNarrationBrowser(
   config: LLMConfig,
@@ -261,7 +361,7 @@ export async function streamNarrationBrowser(
   balance: NarrativeBalance,
   history: NarrativeEntry[],
   playerInput: string,
-  onNarrationProgress: (narrationSoFar: string) => void,
+  onStreamProgress: (state: StreamingState) => void,
   mentionedCharacterNames?: string[],
   fromChoice?: boolean,
 ): Promise<string> {
@@ -278,19 +378,27 @@ export async function streamNarrationBrowser(
     : `故事开始。玩家已进入故事世界。\n\n玩家的第一个行动：${playerInput || '（观察周围环境）'}${mentionHint}${choiceHint}`;
 
   let full = '';
-  let lastEmitted = '';
+  let lastSignature = '';
   for await (const token of streamLLMBrowser(config, systemPrompt, userMessage, {
     temperature: 0.3 + guardrail.temperature * 0.7,
     maxTokens: 4096,
   })) {
     full += token;
-    const narration = extractStreamingNarration(full);
-    if (narration !== lastEmitted) {
-      lastEmitted = narration;
-      onNarrationProgress(narration);
+    const state = extractStreamingState(full);
+    const sig = signatureOf(state);
+    if (sig !== lastSignature) {
+      lastSignature = sig;
+      onStreamProgress(state);
     }
   }
   return full;
+}
+
+function signatureOf(state: StreamingState): string {
+  const dsig = state.dialogues
+    .map(d => `${d.partial ? 'P' : 'F'}|${d.speaker}|${d.content.length}`)
+    .join('/');
+  return `${state.narration.length}@${dsig}`;
 }
 
 /** Generate epilogue (non-streaming, called once at end) */
