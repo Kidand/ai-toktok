@@ -75,7 +75,7 @@ export default function SetupPage() {
   };
 
   return (
-    <div className="min-h-screen safe-top" style={{ paddingBottom: 'calc(10rem + env(safe-area-inset-bottom))' }}>
+    <div className="min-h-screen safe-top pb-8">
       {/* 顶栏 */}
       <div className="sticky top-0 z-20 glass border-b px-4 sm:px-6 py-3 flex items-center gap-3">
         <button onClick={() => router.push('/')} className="btn btn-ghost btn-sm" aria-label="返回">
@@ -233,17 +233,20 @@ export default function SetupPage() {
                     onChange={setNarrativeWeight} />
           </div>
         </section>
-      </main>
 
-      {/* 吸底 CTA */}
-      <div className="fixed bottom-0 inset-x-0 z-30 glass border-t px-4 sm:px-6 py-3 pb-safe">
-        <div className="max-w-3xl mx-auto">
+        {/* 行内 CTA（原先是 fixed 吸底，改为跟随内容，避免遮挡最后一段滑动条） */}
+        <div className="pt-2">
           <button onClick={handleStartGame} disabled={!canStart}
                   className="btn btn-primary btn-lg btn-block">
             <Play width={16} height={16} />穿越开始
           </button>
+          {!canStart && (
+            <p className="text-xs text-muted-dim text-center mt-3 font-sans">
+              {entryMode === 'soul-transfer' ? '请先选择一个角色' : '请先生成转生角色'}
+            </p>
+          )}
         </div>
-      </div>
+      </main>
     </div>
   );
 }
