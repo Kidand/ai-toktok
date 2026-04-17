@@ -81,6 +81,7 @@ export default function PlayPage() {
     action: string,
     playerInput?: string,
     mentionedNames?: string[],
+    fromChoice?: boolean,
   ) => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
     setIsGenerating(true);
@@ -93,6 +94,7 @@ export default function PlayPage() {
         narrativeHistory, input,
         (narration) => setStreamingText(narration),
         mentionedNames,
+        fromChoice,
       );
       setStreamingText('');
       const result = parseNarrationResponse(raw, parsedStory, input);
@@ -167,7 +169,7 @@ export default function PlayPage() {
   const handleChoice = (choiceText: string) => {
     if (isGenerating || !llmConfig) return;
     addPlayerAction(choiceText);
-    streamNarrate('narrate', choiceText);
+    streamNarrate('narrate', choiceText, undefined, true);
   };
 
   const handleEndStory = async () => {

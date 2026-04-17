@@ -67,6 +67,25 @@ ${strictnessGuide}
 ## 叙事风格
 ${narrativeGuide}
 
+## 剧情推进要求（必须遵守）
+每次回复都要让故事实质前进，不能原地踏步。具体要求：
+- 至少发生一件**具体的事**：角色采取行动、揭示新信息、环境/时间变化、人物关系变化、新角色登场或离场
+- **禁止**只用不同措辞重复已有场景（例："他仍站在原地"、"店主又打量了他一眼"、"空气依然凝重"）
+- **禁止**连续两次以纯观察/沉思/环境描写作为主要内容
+- 当玩家的输入较被动（如"观察"、"等待"、"继续"、"思考一下"），**由你主动引入新事件或角色动作**推动剧情前进
+- 当玩家的输入具体明确，立刻演出其后果与相关角色的直接反应
+- 单次回复聚焦 1-2 个小事件，控制在 150-400 字；叙事描写占比 ≤ 50%，其余是对话、动作、事件发生
+- 回复结尾要把场景推到一个新的节点（新地点/新人到场/新冲突升级/新信息揭示），不要停在"一切未定"的模糊状态
+
+## 选项设计（choices）
+- 必须是**具体行动**（做什么、说什么、去哪里），不是"感受什么"或"继续观察"
+  - ✓ "上前询问店主关于昨夜的动静"
+  - ✓ "拔剑逼问王公公"
+  - ✗ "继续观察店主"
+  - ✗ "思考下一步"
+- 至少一个选项要能推动主线（揭示关键信息 / 引入冲突 / 遇见关键角色 / 进入关键地点）
+- 避免"等等看"、"再观察"、"暂不行动"这类使剧情停滞的选项
+
 ## 交互格式要求
 你的每次回复必须严格按照以下JSON格式返回，不要包含任何其他文字：
 
@@ -81,7 +100,7 @@ ${narrativeGuide}
   ]
 }
 
-注意：choices 提供2-3个选项，interactions 记录本轮互动角色。`;
+注意：choices 提供 2-3 个选项（都要是具体行动）；interactions 记录本轮有反应的角色。`;
 }
 
 function buildHistoryContext(history: NarrativeEntry[], maxEntries = 20): string {
@@ -244,15 +263,19 @@ export async function streamNarrationBrowser(
   playerInput: string,
   onNarrationProgress: (narrationSoFar: string) => void,
   mentionedCharacterNames?: string[],
+  fromChoice?: boolean,
 ): Promise<string> {
   const systemPrompt = buildWorldSystemPrompt(story, playerConfig, guardrail, balance);
   const historyContext = buildHistoryContext(history);
   const mentionHint = mentionedCharacterNames && mentionedCharacterNames.length > 0
     ? `\n\n## 玩家明确指向的对象\n玩家在本次行动中主动面向并互动的角色：${mentionedCharacterNames.join('、')}。请让这些角色在回应中发挥主要作用（如对话、反应）。`
     : '';
+  const choiceHint = fromChoice
+    ? `\n\n## 注意\n玩家是从预设选项中选取了一个行动。请以此为起点让剧情**实质推进**（一件具体的事发生），不要用氛围描写填充替代真正的进展。`
+    : '';
   const userMessage = historyContext
-    ? `## 之前的剧情\n${historyContext}\n\n## 玩家当前行动\n${playerInput}${mentionHint}`
-    : `故事开始。玩家已进入故事世界。\n\n玩家的第一个行动：${playerInput || '（观察周围环境）'}${mentionHint}`;
+    ? `## 之前的剧情\n${historyContext}\n\n## 玩家当前行动\n${playerInput}${mentionHint}${choiceHint}`
+    : `故事开始。玩家已进入故事世界。\n\n玩家的第一个行动：${playerInput || '（观察周围环境）'}${mentionHint}${choiceHint}`;
 
   let full = '';
   let lastEmitted = '';
