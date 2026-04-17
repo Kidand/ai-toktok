@@ -4,9 +4,10 @@ import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { LLMProvider, GameSave } from '@/lib/types';
-import { loadStory, deleteSave } from '@/lib/storage';
+import { loadStory, deleteSave, saveStory } from '@/lib/storage';
 import { parseStoryClient } from '@/lib/parser-client';
-import { Upload, Book, Trash, Play, CheckCircle } from '@/components/Icons';
+import { PRESETS, type Preset } from '@/lib/presets';
+import { Upload, Book, Trash, Play, CheckCircle, Sparkles } from '@/components/Icons';
 
 export default function HomePage() {
   const router = useRouter();
@@ -24,7 +25,7 @@ export default function HomePage() {
   const [fileName, setFileName] = useState('');
   const [error, setError] = useState('');
   const [parseProgress, setParseProgress] = useState<{ phase: string; current: number; total: number; resumedFrom?: number; retrying?: number; characters?: number }>({ phase: '', current: 0, total: 0 });
-  const [tab, setTab] = useState<'new' | 'saves'>('new');
+  const [tab, setTab] = useState<'presets' | 'new' | 'saves'>('presets');
   const [showApiDetails, setShowApiDetails] = useState(false);
 
   useEffect(() => { init(); setMounted(true); }, [init]);
@@ -91,6 +92,22 @@ export default function HomePage() {
     if (!confirm('确定删除这个存档？')) return;
     deleteSave(saveId);
     loadSaves();
+  };
+
+  const handlePickPreset = (preset: Preset) => {
+    if (!apiKey.trim() && !llmConfig) {
+      setError('请先填写 API 密钥');
+      return;
+    }
+    setError('');
+    if (!llmConfig) {
+      setLLMConfig({ provider, apiKey: apiKey.trim(), model: model.trim() || defaultModel, baseUrl: baseUrl.trim() || undefined });
+    }
+    // Persist the preset's ParsedStory to localStorage so later saves can
+    // reload the story by id like a user-uploaded one.
+    saveStory(preset.story);
+    setParsedStory(preset.story);
+    router.push('/setup');
   };
 
   if (!mounted) {
@@ -178,7 +195,10 @@ export default function HomePage() {
 
         {/* Tabs */}
         <section>
-          <div className="flex items-stretch gap-2">
+          <div className="flex items-stretch gap-2 flex-wrap">
+            <TabButton active={tab === 'presets'} onClick={() => setTab('presets')}>
+              <Sparkles width={16} height={16} />预设故事
+            </TabButton>
             <TabButton active={tab === 'new'} onClick={() => setTab('new')}>
               <Book width={16} height={16} />新故事
             </TabButton>
@@ -187,6 +207,45 @@ export default function HomePage() {
             </TabButton>
           </div>
         </section>
+
+        {/* Tab: Presets */}
+        {tab === 'presets' && (
+          <section className="anim-fade-in">
+            <SectionHead n="02" title="预设 · 开箱即用" />
+            <p className="text-xs text-[var(--ink-muted)] font-mono mb-4">
+              {'// 这些故事已提前解析为图谱，无需本地 LLM 再跑一遍'}
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {PRESETS.map((preset, i) => (
+                <button key={preset.id}
+                        onClick={() => handlePickPreset(preset)}
+                        disabled={!apiKey.trim() && !llmConfig}
+                        className="choice-card text-left disabled:opacity-50 disabled:cursor-not-allowed"
+                        style={{ transform: `rotate(${i % 2 === 0 ? -0.3 : 0.35}deg)` }}>
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
+                    <span className="display text-xl leading-tight">{preset.displayTitle}</span>
+                    <span className="chip chip-mint">PRESET</span>
+                  </div>
+                  <p className="font-serif text-sm text-[var(--ink-soft)] mb-3 leading-relaxed">
+                    {preset.tagline}
+                  </p>
+                  <div className="flex gap-1.5 flex-wrap">
+                    {preset.chips.map(c => <span key={c} className="chip">{c}</span>)}
+                  </div>
+                  <div className="mt-3 pt-3 border-t-2 border-[var(--ink)] border-dashed flex items-center justify-between">
+                    <span className="label-mono text-[10px]">{preset.story.keyEvents.length} EVENTS · {preset.story.characters.length} CAST</span>
+                    <span className="font-mono font-bold text-sm">开始 →</span>
+                  </div>
+                </button>
+              ))}
+            </div>
+            {!apiKey.trim() && !llmConfig && (
+              <p className="text-xs text-[var(--ink-muted)] font-mono mt-3 text-center">
+                {'// 选择预设前，请先在上方填入 API 密钥'}
+              </p>
+            )}
+          </section>
+        )}
 
         {/* Tab content */}
         {tab === 'new' && (
