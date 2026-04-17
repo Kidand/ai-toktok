@@ -16,7 +16,7 @@ import { v4 as uuid } from 'uuid';
 
 const CHUNK_MAX_CHARS = 24000;
 const MAX_RETRIES = 3;
-const PROMPT_VERSION = '3'; // bump invalidates all prior caches
+const PROMPT_VERSION = '4'; // bump invalidates all prior caches
 const CACHE_PREFIX = 'ai-toktok-graph-cache:';
 
 // -----------------------------------------------------------------------------
@@ -95,7 +95,13 @@ const INITIAL_PARSE_PROMPT = `你是一个专业的故事分析AI。解析用户
   "timelineDescription": "本片段时间线"
 }
 
-注意：提取所有有名字的角色；keyEvents 按时间顺序。`;
+注意：
+- 提取所有有名字的角色
+- **必须包含视角人物/主角**（即使故事以第一人称"我"叙述，或用"他/她"代称而极少提及真名）。
+  · 若主角有名字，直接用其名字
+  · 若主角全程无名，使用"主角"作为 name，并在 description 里写明"故事的第一人称视角人物"
+  · 视角人物通常是玩家最可能想扮演的角色，不能遗漏
+- keyEvents 按时间顺序排列`;
 
 function buildIncrementalPrompt(graph: Graph): string {
   const charList = graph.characters.length === 0
@@ -130,7 +136,7 @@ ${worldInfo}
 
 1. **已知角色**出现时（可能用别名、称号、代称如"他/她/那人"指代），使用上面列出的**主名**。
    在 \`updatedCharacters\` 中仅提供**新增或变化**的字段（比如新的背景细节、性格侧面）。
-2. **新角色**放在 \`newCharacters\`，完整填写所有字段。
+2. **新角色**放在 \`newCharacters\`，完整填写所有字段。**特别注意**：如果本片段出现了之前片段未识别到的视角人物/主角（第一人称"我"或代称"他/她"），务必作为新角色添加；若无名字用"主角"作为 name。
 3. **新地点**放在 \`newLocations\`；已知地点不必重复。
 4. **keyEvents**：本片段发生的关键事件，\`involvedCharacters\` 里的名字必须使用主名（已知）或新角色名。
 5. **worldSetting**：只填本片段**新发现或矛盾**的规则/时代/风格信息，其他留空。
