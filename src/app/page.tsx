@@ -49,9 +49,10 @@ export default function HomePage() {
     reader.readAsText(file);
   }, []);
 
+  const canStart = !!apiKey.trim() && !!storyText.trim();
+
   const handleStart = async () => {
-    if (!apiKey.trim()) { setError('请输入 API 密钥'); return; }
-    if (!storyText.trim()) { setError('请上传或粘贴故事文本'); return; }
+    if (!canStart) return;
     setError('');
     setParseProgress({ phase: '', current: 0, total: 0 });
 
@@ -271,10 +272,14 @@ export default function HomePage() {
               </div>
             )}
 
-            <button onClick={handleStart} disabled={isParsing} className="btn btn-primary btn-lg btn-block mt-5">
+            <button onClick={handleStart} disabled={isParsing || !canStart} className="btn btn-primary btn-lg btn-block mt-5">
               {isParsing
-                ? (parseProgress.total > 1 ? `解析中 ${parseProgress.current}/${parseProgress.total}` : '正在解析...')
-                : (<><Play width={16} height={16} />进入故事世界</>)}
+                ? (parseProgress.total > 1 ? `解析中 ${Math.floor(parseProgress.current)}/${parseProgress.total}` : '正在解析...')
+                : !apiKey.trim()
+                  ? '请先填写 API 密钥'
+                  : !storyText.trim()
+                    ? '请先上传或粘贴故事'
+                    : (<><Play width={16} height={16} />进入故事世界</>)}
             </button>
           </section>
         )}
