@@ -182,7 +182,7 @@ export default function PlayPage() {
     setEndConfirm(false);
     setIsGenerating(true);
     try {
-      const epilogue = await generateEpilogueBrowser(llmConfig, parsedStory, playerConfig, characterInteractions);
+      const epilogue = await generateEpilogueBrowser(llmConfig, parsedStory, playerConfig, characterInteractions, narrativeHistory);
       completeGame(epilogue);
       router.push('/epilogue');
     } catch (err) {

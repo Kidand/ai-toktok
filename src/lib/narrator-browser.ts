@@ -409,31 +409,152 @@ function signatureOf(state: StreamingState): string {
   return `${state.narration.length}@${dsig}`;
 }
 
-/** Generate epilogue (non-streaming, called once at end) */
+/**
+ * Compress the narrative history into a turn-numbered transcript suitable for
+ * feeding to the epilogue generator. Long narration blocks are trimmed; very
+ * long playthroughs keep the first few turns plus the most recent ones.
+ */
+function buildPlaythroughTranscript(history: NarrativeEntry[], playerName: string): string {
+  const turns: string[] = [];
+  let current: string[] = [];
+  let turnNum = 0;
+  const flush = () => {
+    if (current.length > 0) {
+      turns.push(`【第 ${turnNum || 1} 幕】\n${current.join('\n')}`);
+      current = [];
+    }
+  };
+  for (const entry of history) {
+    if (entry.type === 'player-action') {
+      flush();
+      turnNum++;
+      current.push(`${playerName}（玩家行动）: ${entry.content}`);
+    } else if (entry.type === 'narration') {
+      const c = entry.content || '';
+      current.push(`[叙事] ${c.length > 400 ? c.slice(0, 400) + '…' : c}`);
+    } else if (entry.type === 'dialogue') {
+      current.push(`${entry.speaker}: "${entry.content}"`);
+    } else if (entry.type === 'system') {
+      current.push(`[系统] ${entry.content}`);
+    }
+  }
+  flush();
+
+  if (turns.length > 45) {
+    const head = turns.slice(0, 3);
+    const tail = turns.slice(turns.length - 35);
+    const skipped = turns.length - head.length - tail.length;
+    return [...head, `\n……（中间省略 ${skipped} 幕，但这些事件确实发生过）……\n`, ...tail].join('\n\n');
+  }
+  return turns.join('\n\n');
+}
+
+function sentimentLabel(s: string): string {
+  if (s === 'positive') return '好感上升';
+  if (s === 'negative') return '嫌隙加深';
+  return '中立';
+}
+
+/**
+ * Generate per-character memoirs grounded in the actual playthrough. Each
+ * character's section gets their personality, full interaction log, and the
+ * complete playthrough transcript so the model writes from concrete lived
+ * events rather than echoing the source material.
+ */
 export async function generateEpilogueBrowser(
   config: LLMConfig,
   story: ParsedStory,
   playerConfig: PlayerConfig,
   characterInteractions: { characterId: string; characterName: string; interactions: { event: string; playerAction: string; characterReaction: string; sentiment: string }[] }[],
+  narrativeHistory: NarrativeEntry[],
 ): Promise<{ characterId: string; characterName: string; memoir: string }[]> {
   const playerChar = playerConfig.entryMode === 'soul-transfer'
-    ? story.characters.find(c => c.id === playerConfig.characterId) : playerConfig.customCharacter;
+    ? story.characters.find(c => c.id === playerConfig.characterId)
+    : playerConfig.customCharacter;
+  const playerName = playerChar?.name || '旅人';
 
-  const interactionSummary = characterInteractions.map(ci => {
-    const events = ci.interactions.map(i =>
-      `- 事件：${i.event}，玩家行动：${i.playerAction}，${ci.characterName}的反应：${i.characterReaction}（${i.sentiment}）`
-    ).join('\n');
-    return `【${ci.characterName}】\n${events}`;
+  // Collect characters who actually participated: either they had tracked
+  // interactions, or they spoke dialogue, or they were explicitly addressed.
+  const speakers = new Set<string>();
+  for (const e of narrativeHistory) {
+    if (e.type === 'dialogue' && e.speaker && e.speaker !== playerName) {
+      speakers.add(e.speaker);
+    }
+  }
+  const interactionMap = new Map(characterInteractions.map(ci => [ci.characterName, ci]));
+
+  let participants = story.characters.filter(c =>
+    c.id !== playerChar?.id && (interactionMap.has(c.name) || speakers.has(c.name))
+  );
+
+  if (participants.length === 0) return [];
+
+  // Rank by richness of interaction when there are many, so the single LLM
+  // call has room to give each memoir proper depth.
+  if (participants.length > 10) {
+    participants.sort((a, b) => {
+      const aCount = (interactionMap.get(a.name)?.interactions.length || 0) + (speakers.has(a.name) ? 1 : 0);
+      const bCount = (interactionMap.get(b.name)?.interactions.length || 0) + (speakers.has(b.name) ? 1 : 0);
+      return bCount - aCount;
+    });
+    participants = participants.slice(0, 10);
+  }
+
+  const characterSections = participants.map(c => {
+    const ci = interactionMap.get(c.name);
+    const dialogueLines = narrativeHistory.filter(e => e.type === 'dialogue' && e.speaker === c.name).length;
+    const interactionLog = ci && ci.interactions.length > 0
+      ? ci.interactions.map((i, idx) =>
+          `  ${idx + 1}. 事件：${i.event}\n     玩家的做法：${i.playerAction}\n     我（${c.name}）的反应：${i.characterReaction}\n     那一刻我对玩家的感受：${sentimentLabel(i.sentiment)}`
+        ).join('\n')
+      : '  （无结构化互动记录，但我在叙事中出现过，见下方叙事记录。）';
+    return `### ${c.name}
+性格：${c.personality || '（未详述）'}
+背景：${c.background || '（未详述）'}
+本次游玩中我开口说话 ${dialogueLines} 次。
+与玩家的互动记录：
+${interactionLog}`;
   }).join('\n\n');
 
-  const systemPrompt = `你是一个后日谈生成器。故事已经结束，为每个角色生成回忆评价。
-故事世界：${story.title}
-玩家角色：${playerChar?.name || '旅人'}
+  const transcript = buildPlaythroughTranscript(narrativeHistory, playerName);
 
-要求：回忆必须精准提到具体事件，语气符合角色性格，以第一人称叙述。
-返回严格JSON：[{ "characterName": "角色名", "memoir": "回忆评价（200-400字）" }]`;
+  const systemPrompt = `你是互动叙事的"后日谈生成器"。玩家刚刚完成了一次**独一无二的游玩经历**，你需要让每个与玩家有过交集的角色，以第一人称写一段对玩家的回忆。
 
-  const response = await callLLMBrowser(config, systemPrompt, `## 交互记录\n${interactionSummary}`, { temperature: 0.6 });
+## 核心原则（非常重要）
+1. **严禁复述原作剧情**。这次游玩里发生的所有事件，哪怕与原作同名，也应以**本次游玩中真实呈现的细节**为准。不要写"据说发生过"、"在那个故事里"这类模糊说法。
+2. **必须直接引用本次游玩中的具体片段**：具体的对话原话、玩家做过的具体动作、事件发生的具体场景。每个回忆里至少出现 **2-3 个**可以对应到下方叙事记录的具体细节。
+3. **用角色自己的声音写**：参考每个角色的性格（personality）和背景（background），让 diction、用词习惯、情感偏好符合这个角色。不同角色的回忆要有明显的语气差异。
+4. **情感轨迹必须体现**：如果某个角色与玩家的互动记录显示了明显的情感变化（比如从中立到好感、或从好感到嫌隙），这个转变必须在回忆里被写出来，并指出是哪个具体事件造成的。
+5. 第一人称叙述，每段 **200-400 字**。可以包含评价、遗憾、感激、困惑、怅惘等情感，不要只陈述事件。
+
+## 输出格式
+严格 JSON 数组，按下方"需要写回忆的角色"中的顺序：
+[
+  { "characterName": "角色名", "memoir": "第一人称回忆文字" }
+]
+只返回 JSON，不要任何其他文字。`;
+
+  const userMessage = `## 故事世界
+${story.title} · ${story.worldSetting.era} · ${story.worldSetting.genre}
+
+## 玩家
+名字：${playerName}
+进入方式：${playerConfig.entryMode === 'soul-transfer' ? '魂穿（扮演既有角色）' : '转生（全新原创角色）'}
+身份：${playerChar?.description || '（无）'}
+性格：${playerChar?.personality || '（无）'}
+
+## 需要写回忆的角色（共 ${participants.length} 位，请按此顺序输出）
+${characterSections}
+
+## 本次游玩的完整叙事记录
+${transcript}
+
+请基于上面这次独有的游玩记录，为每位角色写一段第一人称的回忆。`;
+
+  const response = await callLLMBrowser(config, systemPrompt, userMessage, {
+    temperature: 0.7,
+    maxTokens: 4096,
+  });
   let jsonStr = response;
   const m = response.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (m) jsonStr = m[1];
