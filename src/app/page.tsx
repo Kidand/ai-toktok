@@ -23,7 +23,7 @@ export default function HomePage() {
   const [storyText, setStoryText] = useState('');
   const [fileName, setFileName] = useState('');
   const [error, setError] = useState('');
-  const [parseProgress, setParseProgress] = useState({ phase: '', current: 0, total: 0 });
+  const [parseProgress, setParseProgress] = useState<{ phase: string; current: number; total: number; cached?: number; retrying?: number }>({ phase: '', current: 0, total: 0 });
   const [tab, setTab] = useState<'new' | 'saves'>('new');
   const [showApiDetails, setShowApiDetails] = useState(false);
 
@@ -99,8 +99,9 @@ export default function HomePage() {
   }
 
   const progressPct = parseProgress.phase === 'split' ? 5
-    : parseProgress.phase === 'parse' ? Math.max(10, (parseProgress.current / Math.max(1, parseProgress.total)) * 80)
-    : parseProgress.phase === 'merge' ? 90
+    : parseProgress.phase === 'parse' ? Math.max(10, (parseProgress.current / Math.max(1, parseProgress.total)) * 75)
+    : parseProgress.phase === 'merge' ? 82
+    : parseProgress.phase === 'polish' ? 92
     : parseProgress.phase === 'build' ? 100
     : 0;
 
@@ -229,19 +230,41 @@ export default function HomePage() {
 
             {isParsing && parseProgress.phase && (
               <div className="mt-4 space-y-2 anim-fade-in">
-                <div className="flex justify-between text-xs text-muted font-sans">
-                  <span>
+                <div className="flex justify-between items-center text-xs text-muted font-sans gap-2">
+                  <span className="truncate">
                     {parseProgress.phase === 'split' && '正在分割文本...'}
-                    {parseProgress.phase === 'parse' && `正在解析第 ${parseProgress.current}/${parseProgress.total} 段...`}
-                    {parseProgress.phase === 'merge' && '正在合并分析结果...'}
+                    {parseProgress.phase === 'parse' && (
+                      parseProgress.total === 1
+                        ? '正在解析故事...'
+                        : `并行解析 ${parseProgress.current}/${parseProgress.total} 段`
+                    )}
+                    {parseProgress.phase === 'merge' && '正在合并结构...'}
+                    {parseProgress.phase === 'polish' && '正在生成概要...'}
                     {parseProgress.phase === 'build' && '正在构建故事世界...'}
                   </span>
-                  <span className="text-accent">{Math.round(progressPct)}%</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    {parseProgress.phase === 'parse' && parseProgress.cached! > 0 && (
+                      <span className="chip chip-teal" style={{ padding: '2px 8px' }}>
+                        缓存 {parseProgress.cached}
+                      </span>
+                    )}
+                    {parseProgress.retrying && (
+                      <span className="chip" style={{ padding: '2px 8px', color: 'var(--accent)' }}>
+                        重试 #{parseProgress.retrying}
+                      </span>
+                    )}
+                    <span className="text-accent tabular-nums">{Math.round(progressPct)}%</span>
+                  </div>
                 </div>
                 <div className="w-full h-1.5 bg-border rounded-full overflow-hidden">
                   <div className="h-full rounded-full transition-all duration-500"
                        style={{ background: 'linear-gradient(90deg, var(--accent-strong), var(--accent))', width: `${progressPct}%` }} />
                 </div>
+                {parseProgress.phase === 'parse' && parseProgress.total > 1 && (
+                  <p className="text-xs text-muted-dim font-sans mt-1">
+                    失败的片段会自动重试 · 成功片段已缓存，重试时不会重算
+                  </p>
+                )}
               </div>
             )}
 
