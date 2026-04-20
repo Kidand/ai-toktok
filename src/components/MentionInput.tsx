@@ -57,6 +57,8 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [popupAnchor, setPopupAnchor] = useState<{ top: number; left: number } | null>(null);
   const [currentMentions, setCurrentMentions] = useState<MentionParsed['mentions']>([]);
+  /** True when editor has no real content. Drives the placeholder via [data-empty]. */
+  const [isEmpty, setIsEmpty] = useState(true);
   /** DOM node of the `@` text currently being edited (if any). Used to replace on selection. */
   const draftRangeRef = useRef<{ textNode: Text; startOffset: number; endOffset: number } | null>(null);
   /** Track whether an IME composition is in progress to avoid intercepting Enter. */
@@ -100,6 +102,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
     if (!editor) return { plainText: '', mentions: [] };
     const parsed = parseEditor(editor);
     setCurrentMentions(parsed.mentions);
+    setIsEmpty(parsed.plainText.length === 0 && parsed.mentions.length === 0);
     onChange?.(parsed);
     return parsed;
   }
@@ -110,6 +113,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
       if (editorRef.current) {
         editorRef.current.innerHTML = '';
         setCurrentMentions([]);
+        setIsEmpty(true);
         onChange?.({ plainText: '', mentions: [] });
       }
     },
@@ -315,6 +319,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
         onCompositionStart={() => { isComposingRef.current = true; }}
         onCompositionEnd={() => { isComposingRef.current = false; handleInput(); }}
         data-placeholder={placeholder}
+        data-empty={isEmpty ? 'true' : 'false'}
         role="textbox"
         aria-multiline="true"
         aria-label={placeholder}
