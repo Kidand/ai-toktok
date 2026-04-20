@@ -5,6 +5,54 @@ import { LLMConfig } from './types';
 const DEFAULT_OPENAI_BASE = 'https://api.openai.com/v1';
 const DEFAULT_ANTHROPIC_BASE = 'https://api.anthropic.com/v1';
 
+/** 最小化调用，用于校验 key / base url / model 是否可用。*/
+export async function verifyLLMConfig(config: LLMConfig): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    if (config.provider === 'openai') {
+      const base = config.baseUrl?.replace(/\/+$/, '') || DEFAULT_OPENAI_BASE;
+      const res = await fetch(`${base}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify({
+          model: config.model || 'gpt-4o',
+          messages: [{ role: 'user', content: 'ping' }],
+          max_tokens: 1,
+        }),
+      });
+      if (!res.ok) {
+        const txt = (await res.text()).slice(0, 240);
+        return { ok: false, error: `${res.status} ${txt}` };
+      }
+      return { ok: true };
+    }
+    const base = config.baseUrl?.replace(/\/+$/, '') || DEFAULT_ANTHROPIC_BASE;
+    const res = await fetch(`${base}/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      },
+      body: JSON.stringify({
+        model: config.model || 'claude-sonnet-4-20250514',
+        messages: [{ role: 'user', content: 'ping' }],
+        max_tokens: 1,
+      }),
+    });
+    if (!res.ok) {
+      const txt = (await res.text()).slice(0, 240);
+      return { ok: false, error: `${res.status} ${txt}` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function callLLMBrowser(
   config: LLMConfig,
   systemPrompt: string,

@@ -1,4 +1,4 @@
-import { GameSave, ParsedStory } from './types';
+import { GameSave, LLMConfig, ParsedStory } from './types';
 
 const SAVES_KEY = 'ai-toktok-saves';
 const STORIES_KEY = 'ai-toktok-stories';
@@ -61,13 +61,13 @@ export function loadStory(storyId: string): ParsedStory | null {
 }
 
 /** 保存 LLM 配置 */
-export function saveLLMConfig(config: { provider: string; apiKey: string; model: string }): void {
+export function saveLLMConfig(config: LLMConfig): void {
   if (typeof window === 'undefined') return;
   localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
 }
 
 /** 加载 LLM 配置 */
-export function loadLLMConfig(): { provider: string; apiKey: string; model: string } | null {
+export function loadLLMConfig(): LLMConfig | null {
   if (typeof window === 'undefined') return null;
   const raw = localStorage.getItem(CONFIG_KEY);
   return raw ? JSON.parse(raw) : null;

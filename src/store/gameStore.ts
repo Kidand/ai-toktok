@@ -65,7 +65,7 @@ export const useGameStore = create<GameState & GameActions>()(
     const config = loadLLMConfig();
     const saves = loadAllSaves();
     set({
-      llmConfig: config as LLMConfig | null,
+      llmConfig: config,
       saves,
       // transient flags should never survive a reload
       isParsing: false,

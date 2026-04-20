@@ -1,13 +1,20 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
-import { LLMProvider, GameSave } from '@/lib/types';
+import { LLMConfig, LLMProvider, GameSave } from '@/lib/types';
 import { loadStory, deleteSave, saveStory } from '@/lib/storage';
 import { parseStoryClient } from '@/lib/parser-client';
+import { verifyLLMConfig } from '@/lib/llm-browser';
 import { PRESETS, type Preset } from '@/lib/presets';
 import { Upload, Book, Trash, Play, CheckCircle, Sparkles } from '@/components/Icons';
+
+type VerifyState =
+  | { status: 'idle' }
+  | { status: 'verifying' }
+  | { status: 'ok'; sig: string }
+  | { status: 'error'; sig: string; message: string };
 
 export default function HomePage() {
   const router = useRouter();
@@ -27,6 +34,7 @@ export default function HomePage() {
   const [parseProgress, setParseProgress] = useState<{ phase: string; current: number; total: number; resumedFrom?: number; retrying?: number; characters?: number }>({ phase: '', current: 0, total: 0 });
   const [tab, setTab] = useState<'presets' | 'new' | 'saves'>('presets');
   const [showApiDetails, setShowApiDetails] = useState(false);
+  const [verify, setVerify] = useState<VerifyState>({ status: 'idle' });
 
   useEffect(() => { init(); setMounted(true); }, [init]);
 
@@ -40,6 +48,39 @@ export default function HomePage() {
   }, [llmConfig]);
 
   const defaultModel = provider === 'openai' ? 'gpt-4o' : 'claude-sonnet-4-20250514';
+
+  const buildConfig = useCallback((): LLMConfig => ({
+    provider,
+    apiKey: apiKey.trim(),
+    model: model.trim() || defaultModel,
+    baseUrl: baseUrl.trim() || undefined,
+  }), [provider, apiKey, model, defaultModel, baseUrl]);
+
+  // Signature identifies "this exact config". Whenever any field changes, any
+  // previous verify result no longer applies.
+  const configSig = useMemo(
+    () => `${provider}|${apiKey.trim()}|${model.trim() || defaultModel}|${baseUrl.trim()}`,
+    [provider, apiKey, model, defaultModel, baseUrl],
+  );
+
+  const verifiedForCurrent = verify.status === 'ok' && verify.sig === configSig;
+  const verifyErrorForCurrent = verify.status === 'error' && verify.sig === configSig;
+
+  const handleVerify = useCallback(async () => {
+    if (!apiKey.trim()) {
+      setVerify({ status: 'error', sig: configSig, message: '请先填写 API 密钥' });
+      return;
+    }
+    setVerify({ status: 'verifying' });
+    const result = await verifyLLMConfig(buildConfig());
+    if (result.ok) {
+      setVerify({ status: 'ok', sig: configSig });
+      // Successful verify means this config works — persist so later pages pick it up.
+      setLLMConfig(buildConfig());
+    } else {
+      setVerify({ status: 'error', sig: configSig, message: result.error });
+    }
+  }, [apiKey, configSig, buildConfig, setLLMConfig]);
 
   const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -57,12 +98,7 @@ export default function HomePage() {
     setError('');
     setParseProgress({ phase: '', current: 0, total: 0 });
 
-    const config = {
-      provider,
-      apiKey: apiKey.trim(),
-      model: model.trim() || defaultModel,
-      baseUrl: baseUrl.trim() || undefined,
-    };
+    const config = buildConfig();
     setLLMConfig(config);
     setIsParsing(true);
 
@@ -80,10 +116,8 @@ export default function HomePage() {
   const handleLoadSave = (save: GameSave) => {
     const story = loadStory(save.storyId);
     if (!story) { setError('找不到对应的故事数据'); return; }
-    if (!llmConfig && !apiKey.trim()) { setError('请先配置 API 密钥'); return; }
-    if (!llmConfig) {
-      setLLMConfig({ provider, apiKey: apiKey.trim(), model: model.trim() || defaultModel, baseUrl: baseUrl.trim() || undefined });
-    }
+    if (!apiKey.trim()) { setError('请先配置 API 密钥'); return; }
+    setLLMConfig(buildConfig());
     loadFromSave(save, story);
     router.push('/play');
   };
@@ -94,15 +128,26 @@ export default function HomePage() {
     loadSaves();
   };
 
-  const handlePickPreset = (preset: Preset) => {
-    if (!apiKey.trim() && !llmConfig) {
+  const handlePickPreset = async (preset: Preset) => {
+    if (!apiKey.trim()) {
       setError('请先填写 API 密钥');
       return;
     }
     setError('');
-    if (!llmConfig) {
-      setLLMConfig({ provider, apiKey: apiKey.trim(), model: model.trim() || defaultModel, baseUrl: baseUrl.trim() || undefined });
+    const config = buildConfig();
+
+    if (!verifiedForCurrent) {
+      setVerify({ status: 'verifying' });
+      const result = await verifyLLMConfig(config);
+      if (!result.ok) {
+        setVerify({ status: 'error', sig: configSig, message: result.error });
+        setError(`API 无效：${result.error}`);
+        return;
+      }
+      setVerify({ status: 'ok', sig: configSig });
     }
+
+    setLLMConfig(config);
     // Persist the preset's ParsedStory to localStorage so later saves can
     // reload the story by id like a user-uploaded one.
     saveStory(preset.story);
@@ -152,8 +197,12 @@ export default function HomePage() {
           <div className="surface p-5 sm:p-6">
             <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <span className="label-mono">MODEL · KEY · ENDPOINT</span>
-              {llmConfig && (
+              {verifiedForCurrent ? (
                 <span className="chip chip-mint">
+                  <CheckCircle width={12} height={12} /> 已验证
+                </span>
+              ) : llmConfig && (
+                <span className="chip">
                   <CheckCircle width={12} height={12} /> 已配置
                 </span>
               )}
@@ -174,6 +223,32 @@ export default function HomePage() {
             <FormField label="API KEY">
               <input className="input input-mono" type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={provider === 'openai' ? 'sk-...' : 'sk-ant-...'} />
             </FormField>
+
+            <div className="mt-3 flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={handleVerify}
+                disabled={!apiKey.trim() || verify.status === 'verifying'}
+                className="btn btn-outline btn-sm"
+              >
+                {verify.status === 'verifying' ? '测试中…' : '测试连接'}
+              </button>
+              {verifiedForCurrent && (
+                <span className="chip chip-mint">
+                  <CheckCircle width={12} height={12} /> 连接正常
+                </span>
+              )}
+              {verifyErrorForCurrent && (
+                <span className="chip chip-coral" title={verify.status === 'error' ? verify.message : ''}>
+                  ✕ 连接失败
+                </span>
+              )}
+            </div>
+            {verifyErrorForCurrent && (
+              <p className="mt-2 font-mono text-xs text-[var(--ink-muted)] break-words">
+                {verify.status === 'error' ? verify.message : ''}
+              </p>
+            )}
 
             <button onClick={() => setShowApiDetails(s => !s)}
                     className="mt-3 text-xs text-[var(--ink-muted)] hover:text-[var(--ink)] font-mono underline underline-offset-4 decoration-dashed">
@@ -219,7 +294,7 @@ export default function HomePage() {
               {PRESETS.map((preset, i) => (
                 <button key={preset.id}
                         onClick={() => handlePickPreset(preset)}
-                        disabled={!apiKey.trim() && !llmConfig}
+                        disabled={!apiKey.trim() || verify.status === 'verifying'}
                         className="choice-card text-left disabled:opacity-50 disabled:cursor-not-allowed"
                         style={{ transform: `rotate(${i % 2 === 0 ? -0.3 : 0.35}deg)` }}>
                   <div className="flex items-center gap-2 mb-2 flex-wrap">
@@ -234,15 +309,26 @@ export default function HomePage() {
                   </div>
                   <div className="mt-3 pt-3 border-t-2 border-[var(--ink)] border-dashed flex items-center justify-between">
                     <span className="label-mono text-[10px]">{preset.story.keyEvents.length} EVENTS · {preset.story.characters.length} CAST</span>
-                    <span className="font-mono font-bold text-sm">开始 →</span>
+                    <span className="font-mono font-bold text-sm">
+                      {verify.status === 'verifying' ? '验证中…' : '开始 →'}
+                    </span>
                   </div>
                 </button>
               ))}
             </div>
-            {!apiKey.trim() && !llmConfig && (
+            {!apiKey.trim() ? (
               <p className="text-xs text-[var(--ink-muted)] font-mono mt-3 text-center">
                 {'// 选择预设前，请先在上方填入 API 密钥'}
               </p>
+            ) : !verifiedForCurrent && (
+              <p className="text-xs text-[var(--ink-muted)] font-mono mt-3 text-center">
+                {'// 点击预设后将自动验证 API，或先手动「测试连接」'}
+              </p>
+            )}
+            {error && tab === 'presets' && (
+              <div className="mt-3 p-3 border-[2.5px] border-[var(--ink)] bg-[var(--hi-coral-soft)] font-mono text-sm break-words">
+                ⚠ {error}
+              </div>
             )}
           </section>
         )}
