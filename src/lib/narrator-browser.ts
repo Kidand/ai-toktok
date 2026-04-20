@@ -322,14 +322,20 @@ export function extractStreamingState(buffer: string): StreamingState {
   return { narration, dialogues };
 }
 
-/** Parse raw LLM JSON response into structured entries */
-export function parseNarrationResponse(raw: string, story: ParsedStory, playerInput: string) {
-  // Reasoning-model safety: strip thinking wrappers first.
-  const cleaned = stripThinking(raw);
+type ParsedNarrationShape = {
+  narration?: string;
+  dialogues?: { speaker: string; content: string }[];
+  choices?: { text: string; isBranchPoint: boolean }[];
+  interactions?: { characterName: string; event: string; reaction: string; sentiment: string }[];
+};
 
-  // Prefer explicit ```json fences, then fall back to 'first balanced JSON
-  // value in the buffer' (handles untagged preambles/outros), then last-
-  // resort the whole cleaned string.
+/**
+ * Strict-parse the response if possible, otherwise return null. Tries a
+ * ```json fence first, then the first balanced JSON value, then the whole
+ * cleaned string. Designed so callers can fall back to a forgiving parser
+ * when strict parse fails.
+ */
+function tryStrictParseResponse(cleaned: string): ParsedNarrationShape | null {
   let jsonStr = cleaned.trim();
   const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenced) jsonStr = fenced[1].trim();
@@ -337,16 +343,58 @@ export function parseNarrationResponse(raw: string, story: ParsedStory, playerIn
     const balanced = extractFirstBalancedJSON(cleaned);
     if (balanced) jsonStr = balanced;
   }
-
-  let parsed: { narration?: string; dialogues?: { speaker: string; content: string }[]; choices?: { text: string; isBranchPoint: boolean }[]; interactions?: { characterName: string; event: string; reaction: string; sentiment: string }[] };
   try {
-    parsed = JSON.parse(jsonStr);
+    return JSON.parse(jsonStr) as ParsedNarrationShape;
   } catch {
-    // Fallback: drop the raw buffer (thinking-stripped) as narration so at
-    // least something shows, but don't leak JSON scaffolding to the reader.
+    return null;
+  }
+}
+
+/**
+ * Parse raw LLM JSON response into structured entries. Robust to malformed,
+ * truncated, or quasi-JSON output: if strict parse fails we re-use the
+ * streaming extractor (extractStreamingState) which tolerates unclosed
+ * objects/arrays and still pulls out whatever narration + complete dialogues
+ * are present. Only when both paths recover nothing do we render cleaned
+ * text as raw narration.
+ */
+export function parseNarrationResponse(raw: string, story: ParsedStory, playerInput: string) {
+  const cleaned = stripThinking(raw);
+
+  // Path A: strict JSON parse
+  let parsed = tryStrictParseResponse(cleaned);
+
+  // Path B: recovery via streaming extractor — handles truncation, trailing
+  // commas, mid-dialogue cutoffs, and other shapes that break JSON.parse.
+  if (!parsed) {
+    const streamState = extractStreamingState(cleaned);
+    if (streamState.narration || streamState.dialogues.length > 0) {
+      parsed = {
+        narration: streamState.narration || undefined,
+        // Only keep fully-formed dialogues; drop the trailing partial so the
+        // reader doesn't get a half-sentence bubble.
+        dialogues: streamState.dialogues
+          .filter(d => !d.partial && (d.speaker || d.content))
+          .map(d => ({ speaker: d.speaker, content: d.content })),
+      };
+    }
+  }
+
+  // Path C: nothing parseable at all — render cleaned text as a narration
+  // fallback and offer default choices so the player can still advance.
+  if (!parsed || (!parsed.narration && !(parsed.dialogues && parsed.dialogues.length > 0))) {
+    const fallbackText = (cleaned || raw).trim();
     return {
-      entries: [{ id: uuid(), type: 'narration' as const, content: cleaned || raw, timestamp: Date.now(),
-        choices: [{ id: uuid(), text: '继续观察', isBranchPoint: false }, { id: uuid(), text: '与附近的人交谈', isBranchPoint: false }] }],
+      entries: [{
+        id: uuid(),
+        type: 'narration' as const,
+        content: fallbackText || '（模型返回了无法解析的内容）',
+        timestamp: Date.now(),
+        choices: [
+          { id: uuid(), text: '继续观察', isBranchPoint: false },
+          { id: uuid(), text: '与附近的人交谈', isBranchPoint: false },
+        ],
+      }],
       interactions: [],
     };
   }
@@ -357,7 +405,15 @@ export function parseNarrationResponse(raw: string, story: ParsedStory, playerIn
     entries.push({ id: uuid(), type: 'dialogue', speaker: d.speaker, content: d.content, timestamp: Date.now() });
   }
   const choices: StoryChoice[] = (parsed.choices || []).map(c => ({ id: uuid(), text: c.text, isBranchPoint: c.isBranchPoint }));
-  if (entries.length > 0 && choices.length > 0) entries[entries.length - 1].choices = choices;
+  // If recovery path B gave us no choices, synthesize a pair of neutral ones
+  // so the turn isn't a dead end.
+  const finalChoices: StoryChoice[] = choices.length > 0
+    ? choices
+    : [
+        { id: uuid(), text: '继续观察', isBranchPoint: false },
+        { id: uuid(), text: '开口说些什么', isBranchPoint: false },
+      ];
+  if (entries.length > 0) entries[entries.length - 1].choices = finalChoices;
 
   const interactions = (parsed.interactions || []).map(inter => {
     const char = story.characters.find(c => c.name === inter.characterName);
