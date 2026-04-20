@@ -553,6 +553,35 @@ body {
   line-height: 1.75;
   color: var(--ink);
   box-shadow: var(--shadow-sm);
+  max-width: 100%;
+}
+
+/* Player-variant: mirror the speaker tab to the right-hand side of the
+ * block, and tint the content block with the highlighter yellow so the
+ * reader instantly sees it's the player character speaking — distinct
+ * from the monospace player-action banner AND distinct from NPC bubbles. */
+.speaker-tab-player {
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+  align-self: flex-end;
+  padding-right: 6px;
+}
+.speaker-tab-you {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  padding: 0 5px;
+  font-family: var(--font-mono);
+  font-size: 0.7em;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  background: var(--ink);
+  color: var(--hi-yellow);
+  border-radius: 2px;
+}
+.dialogue-block-player {
+  background: var(--hi-yellow-soft);
+  border-radius: var(--radius-sm) 0 var(--radius-sm) var(--radius-sm);
+  align-self: flex-end;
 }
 
 /* Player action "terminal" banner */

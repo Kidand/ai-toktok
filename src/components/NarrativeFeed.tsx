@@ -15,12 +15,16 @@ type Props = {
  *     gets a labeled divider like `── T03 ───────`.
  *   - Narration flows as serif prose.
  *   - NPC dialogue renders as a folder-tab block: a colored speaker tab on
- *     top, then a bordered content block underneath. Each NPC has a stable
- *     color assigned via a simple name-hash so '林宇 = 珊瑚色' stays true
- *     across the whole playthrough.
- *   - Player actions render as a monospace `▸ command` banner in highlighter
- *     yellow — a deliberate mirror of a terminal prompt, making the player's
- *     agency visually distinct from everything else.
+ *     top (left-aligned), then a bordered content block underneath. Each
+ *     NPC has a stable name-hash color so '林宇 = 珊瑚色' stays true across
+ *     the playthrough.
+ *   - Player *dialogue* (in-story speech) mirrors the NPC form but the
+ *     whole block is right-aligned with a yellow tab — visually the
+ *     mirror of the NPC speaker block, so the reader sees whose voice
+ *     spoke whom.
+ *   - Player *action* (typed/clicked intent) renders as a monospace
+ *     `▸ command` banner in highlighter yellow — distinct from dialogue,
+ *     it's the player's out-of-world agency, not their in-world speech.
  */
 export function NarrativeFeed({
   entries, playerName, streamingNarration, streamingDialogues, isGenerating,
@@ -70,30 +74,22 @@ export function NarrativeFeed({
           )}
 
           {hasStreaming && streamingDialogues && streamingDialogues.map((d, i) => {
-            const isPlayer = d.speaker === playerName;
             const isLastPartial = i === streamingDialogues.length - 1 && !!d.partial;
-            if (isPlayer) {
-              return (
-                <div key={`s-${i}`} className="player-banner mb-3">
-                  <span>
-                    {d.content}
-                    {isLastPartial && <span className="typing-cursor" />}
-                  </span>
-                </div>
-              );
-            }
+            // Skip dialogues that never received any content (neither speaker
+            // nor body) — they're usually LLM artifacts or completed-but-empty
+            // rows that would render as a dangling tab.
+            if (!d.speaker && !d.content) return null;
+            // Skip completed-but-empty dialogues (tab with no content).
+            if (!isLastPartial && !d.content) return null;
             return (
-              <div key={`s-${i}`} className="mb-3">
-                <div className="speaker-tab" data-speaker-color={speakerColor(d.speaker || '')}>
-                  {d.speaker || '…'}
-                </div>
-                <div className="dialogue-block">
-                  {d.content
-                    ? `"${d.content}${isLastPartial ? '' : '"'}`
-                    : <span className="text-[var(--ink-muted)] italic font-sans text-sm">（正在开口…）</span>}
-                  {isLastPartial && <span className="typing-cursor" />}
-                </div>
-              </div>
+              <DialogueBlock
+                key={`s-${i}`}
+                speaker={d.speaker}
+                content={d.content}
+                isPlayer={d.speaker === playerName}
+                playerName={playerName}
+                streaming={isLastPartial}
+              />
             );
           })}
         </div>
@@ -126,21 +122,16 @@ function NarrativeBlock({ entry, playerName }: { entry: NarrativeEntry; playerNa
         </div>
       );
     case 'dialogue': {
-      const isPlayer = entry.speaker === playerName;
-      if (isPlayer) {
-        return (
-          <div className="player-banner mb-3">
-            <span>{entry.content}</span>
-          </div>
-        );
-      }
+      // Skip dialogues with no meaningful payload (LLM artifacts).
+      if (!entry.content && !entry.speaker) return null;
+      if (!entry.content) return null;
       return (
-        <div className="mb-3">
-          <div className="speaker-tab" data-speaker-color={speakerColor(entry.speaker || '')}>
-            {entry.speaker}
-          </div>
-          <div className="dialogue-block">&ldquo;{entry.content}&rdquo;</div>
-        </div>
+        <DialogueBlock
+          speaker={entry.speaker}
+          content={entry.content}
+          isPlayer={entry.speaker === playerName}
+          playerName={playerName}
+        />
       );
     }
     case 'player-action':
@@ -154,6 +145,41 @@ function NarrativeBlock({ entry, playerName }: { entry: NarrativeEntry; playerNa
     default:
       return null;
   }
+}
+
+/**
+ * Shared dialogue renderer for both committed and streaming entries.
+ * Player dialogues mirror the NPC form to the right and use the yellow
+ * (player) speaker color, keeping parity with NPCs while staying
+ * visually distinct from the monospace player-action banner.
+ */
+function DialogueBlock({
+  speaker, content, isPlayer, playerName, streaming,
+}: {
+  speaker?: string;
+  content: string;
+  isPlayer: boolean;
+  playerName?: string;
+  streaming?: boolean;
+}) {
+  const displaySpeaker = speaker || (isPlayer ? playerName : '…') || '…';
+  const color = isPlayer ? 'yellow' : speakerColor(speaker || '');
+  const tabClass = isPlayer ? 'speaker-tab speaker-tab-player' : 'speaker-tab';
+  const blockClass = isPlayer ? 'dialogue-block dialogue-block-player' : 'dialogue-block';
+  const outerClass = isPlayer ? 'mb-3 flex flex-col items-end' : 'mb-3';
+  return (
+    <div className={outerClass}>
+      <div className={tabClass} data-speaker-color={color}>
+        {displaySpeaker}
+        {isPlayer && <span className="speaker-tab-you">你</span>}
+      </div>
+      <div className={blockClass}>
+        &ldquo;{content}
+        {streaming && <span className="typing-cursor" />}
+        {!streaming && '"'}
+      </div>
+    </div>
+  );
 }
 
 /**
@@ -175,7 +201,7 @@ function groupIntoTurns(entries: NarrativeEntry[]): NarrativeEntry[][] {
   return turns;
 }
 
-/** Palette for NPC speakers. Yellow reserved for CTAs, not speakers. */
+/** Palette for NPC speakers. Yellow reserved for CTAs / the player, never NPCs. */
 const SPEAKER_COLORS = ['coral', 'cyan', 'mint', 'lilac', 'orange', 'pink', 'sky'] as const;
 
 /** Deterministic hash-to-color so the same speaker keeps the same color. */
