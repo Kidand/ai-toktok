@@ -100,19 +100,6 @@ ${narrativeGuide}
   ]
 }
 
-## 对白归属规则（非常重要）
-- 任何角色说出口的话，**必须**放进 \`dialogues\` 数组，一条一个对象
-- **禁止**把对白写进 \`narration\` 字段。以下几种写法一律禁止：
-  - ✗ \`[弗兰克] 闭嘴，你这只死狗！\`
-  - ✗ \`弗兰克："闭嘴，你这只死狗！"\`
-  - ✗ \`弗兰克说：闭嘴。\`（连同角色名 + 冒号 + 台词的任何变体）
-  - ✗ \`电话那头传来托德漫不经心的语调："哦？律师先生……"\`（藏在描写句里的直接引语也禁止）
-  - ✗ \`他发出一声低沉的笑："你的小朋友惹麻烦了……"\`
-- narration 字段**绝对不能出现任何中文/英文引号包起来的直接引语**——只要是角色嘴里说出来的原话，一律拆到 \`dialogues\` 里
-- narration 字段只写：环境描写、角色动作、心理活动、第三人称叙事
-- 每一条 \`dialogues\` 条目的 \`speaker\` 必须是上面"角色列表"中已出现的名字或玩家角色名；如果是神秘的未揭示者，用 "???" 作为 speaker 并在 narration 里描写其外形/声音
-- \`dialogues\` 条目的 \`content\` 不能为空字符串——没话可说就不要出这个条目
-
 注意：choices 提供 2-3 个选项（都要是具体行动）；interactions 记录本轮有反应的角色。`;
 }
 
@@ -335,303 +322,14 @@ export function extractStreamingState(buffer: string): StreamingState {
   return { narration, dialogues };
 }
 
-type ParsedNarrationShape = {
-  narration?: string;
-  dialogues?: { speaker: string; content: string }[];
-  choices?: { text: string; isBranchPoint: boolean }[];
-  interactions?: { characterName: string; event: string; reaction: string; sentiment: string }[];
-};
+/** Parse raw LLM JSON response into structured entries */
+export function parseNarrationResponse(raw: string, story: ParsedStory, playerInput: string) {
+  // Reasoning-model safety: strip thinking wrappers first.
+  const cleaned = stripThinking(raw);
 
-// Paired quote marks that indicate direct speech in Chinese-first prose.
-const QUOTE_PAIRS: ReadonlyArray<readonly [string, string]> = [
-  ['\u201C', '\u201D'], // " "
-  ['\u300C', '\u300D'], // 「 」
-  ['\u300E', '\u300F'], // 『 』
-];
-
-type QuotedSpan = { start: number; end: number; content: string };
-
-/**
- * Collect every paired-quote span in `text`, plus alternating ASCII `"`
- * pairs that live on the same line. Overlaps are resolved by keeping the
- * earliest-starting span.
- */
-function findQuotedSpans(text: string): QuotedSpan[] {
-  const spans: QuotedSpan[] = [];
-  for (const [open, close] of QUOTE_PAIRS) {
-    let i = 0;
-    while (i < text.length) {
-      const o = text.indexOf(open, i);
-      if (o < 0) break;
-      const c = text.indexOf(close, o + 1);
-      if (c < 0) break;
-      spans.push({ start: o, end: c + 1, content: text.slice(o + 1, c) });
-      i = c + 1;
-    }
-  }
-  // ASCII straight quotes: pair alternately, same line only (avoids pairing
-  // an opening quote on one line with a closing quote many lines later).
-  const asciiIdx: number[] = [];
-  for (let i = 0; i < text.length; i++) if (text[i] === '"') asciiIdx.push(i);
-  for (let k = 0; k + 1 < asciiIdx.length; k += 2) {
-    const s = asciiIdx[k], e = asciiIdx[k + 1];
-    if (text.slice(s, e + 1).includes('\n')) continue;
-    spans.push({ start: s, end: e + 1, content: text.slice(s + 1, e) });
-  }
-  spans.sort((a, b) => a.start - b.start);
-  const nonOverlap: QuotedSpan[] = [];
-  for (const s of spans) {
-    if (nonOverlap.length === 0 || s.start >= nonOverlap[nonOverlap.length - 1].end) {
-      nonOverlap.push(s);
-    }
-  }
-  return nonOverlap;
-}
-
-const CJK_CHAR = /[\u4e00-\u9fa5]/;
-const DOT_CHAR = /[\u00B7\u30FB]/;
-
-// Characters that commonly appear right before a proper noun but aren't part
-// of the name itself (connectors, verbs, particles, pronouns, quantifiers).
-// Used to bound a walk-back scan when extracting a novel `X·Y` name from
-// running prose. Enumeration is deliberately conservative — mis-stops just
-// produce a slightly longer name, while missing stops produce a clearly
-// wrong name like "而是托德·马丁".
-const NAME_STOP_CHARS = new Set([
-  '是', '而', '见', '听', '有', '只', '在', '正', '刚', '对', '当', '给', '让',
-  '他', '她', '它', '我', '你', '着', '地', '之', '也', '却', '就', '便',
-  '的', '了', '个', '位', '名', '被', '使', '向', '朝', '从', '到', '为',
-  '来', '去', '传', '发', '走', '响', '出', '问', '请', '叫', '喊', '说', '道',
-  '唤', '带', '跟', '随', '并', '和', '与', '看', '找', '等', '想', '要', '做',
-  '如', '且', '又', '但', '可', '不', '没', '已', '必', '会', '能', '将',
-  '吧', '啊', '呀', '哇', '呢', '吗', '于', '以',
-]);
-
-/**
- * Scan a text ending at the colon for a `...X·Y...` name pattern. Returns
- * the best-guess full name or null if no middle-dot name is present. We
- * walk back up to 4 CJK chars (stopping at obvious non-name chars) and
- * forward 2 CJK chars — most Chinese given names are exactly 2 chars.
- */
-function scanDotName(tail: string): string | null {
-  for (let i = tail.length - 1; i >= 0; i--) {
-    const ch = tail.charAt(i);
-    if (!DOT_CHAR.test(ch)) continue;
-    let back = '';
-    for (let j = i - 1; j >= 0 && back.length < 4; j--) {
-      const c = tail.charAt(j);
-      if (!CJK_CHAR.test(c)) break;
-      if (NAME_STOP_CHARS.has(c)) break;
-      back = c + back;
-    }
-    let forward = '';
-    for (let j = i + 1; j < tail.length && forward.length < 2; j++) {
-      const c = tail.charAt(j);
-      if (!CJK_CHAR.test(c)) break;
-      forward += c;
-    }
-    if (back.length >= 2 && forward.length >= 1) {
-      return `${back}${ch}${forward}`;
-    }
-    // Keep scanning further left for another `·` if this one didn't yield
-    // a usable name.
-  }
-  return null;
-}
-
-/**
- * Attribute a quoted span to a speaker using the narration that immediately
- * precedes it. Strategy, in confidence order:
- *   1. Full roster name present in the last 80 chars → latest occurrence.
- *   2. Novel `X·Y` name pattern in the same window (covers characters the
- *      model introduces that aren't in the roster, like "托德·马丁").
- *   3. Roster short-form match ("杰西" when roster has "杰西·平克曼") → full name.
- *
- * Returns null when no confident attribution is available; caller falls
- * back to running speaker or `???` depending on other signals.
- */
-function attributeSpeakerFromBefore(before: string, speakerSet: Set<string>): string | null {
-  const tail = before.slice(-80);
-
-  let best: { name: string; idx: number } | null = null;
-  for (const name of speakerSet) {
-    if (!name) continue;
-    const idx = tail.lastIndexOf(name);
-    if (idx >= 0 && (!best || idx > best.idx)) best = { name, idx };
-  }
-  if (best) return best.name;
-
-  const dotName = scanDotName(tail);
-  if (dotName) return dotName;
-
-  let shortBest: { full: string; idx: number } | null = null;
-  for (const full of speakerSet) {
-    if (!full) continue;
-    const dotIdx = full.search(DOT_CHAR);
-    const short = dotIdx >= 0 ? full.slice(0, dotIdx) : full.length >= 3 ? full.slice(0, 2) : '';
-    if (short.length < 2) continue;
-    const idx = tail.lastIndexOf(short);
-    if (idx >= 0 && (!shortBest || idx > shortBest.idx)) shortBest = { full, idx };
-  }
-  if (shortBest) return shortBest.full;
-
-  return null;
-}
-
-/**
- * If the LLM called the same character by both a full name and a short
- * form ("托德" vs. "托德·马丁"), promote the short form to the longer
- * previously-seen spelling so the UI shows a single consistent speaker.
- */
-function canonicalizeSpeaker(name: string, seen: Set<string>): string {
-  let best = name;
-  for (const s of seen) {
-    if (s.length > best.length && (s.startsWith(name) || s.endsWith(name))) best = s;
-  }
-  return best;
-}
-
-/**
- * Models sometimes collapse dialogue lines into the narration field. They
- * do it in script-style shorthand on its own line — "[弗兰克] 闭嘴！",
- * "弗兰克："闭嘴！"" — and also mid-paragraph, embedding quoted speech in
- * running prose ("托德·马丁漫不经心的语调："哦？律师先生……""). Both
- * cases get rescued here as real dialogue entries, positional order
- * preserved so narration and dialogue interleave the way the model meant.
- *
- * Known speakers (roster + player) are used as an allow-list for looser
- * line-level patterns so regular prose ("她走到窗边：外面……") doesn't get
- * accidentally mis-identified.
- */
-function rescueEntriesFromNarration(
-  narration: string,
-  knownSpeakers: string[],
-): NarrativeEntry[] {
-  const speakerSet = new Set(knownSpeakers.filter(Boolean));
-  const spans = findQuotedSpans(narration);
-
-  type Chunk = { kind: 'narr'; text: string } | { kind: 'dialogue'; text: string; speaker: string };
-  const chunks: Chunk[] = [];
-  const seenSpeakers = new Set<string>(speakerSet);
-  let cursor = 0;
-  let runningSpeaker: string | null = null;
-
-  for (const span of spans) {
-    const rawBefore = narration.slice(cursor, span.start);
-    const content = span.content.trim();
-    const endsWithColon = /[\uff1a:]\s*$/.test(rawBefore);
-
-    let speaker = attributeSpeakerFromBefore(rawBefore, speakerSet);
-    if (!speaker && endsWithColon) speaker = runningSpeaker;
-
-    // No attribution signal at all → leave the quote in narration. Could be
-    // a title, nickname, or emphasized phrase rather than spoken dialogue.
-    if (!speaker && !endsWithColon) {
-      chunks.push({ kind: 'narr', text: narration.slice(cursor, span.end) });
-      cursor = span.end;
-      continue;
-    }
-    if (!content) {
-      chunks.push({ kind: 'narr', text: narration.slice(cursor, span.end) });
-      cursor = span.end;
-      continue;
-    }
-    if (!speaker) speaker = '???';
-
-    speaker = canonicalizeSpeaker(speaker, seenSpeakers);
-    seenSpeakers.add(speaker);
-
-    // Drop the trailing `：` that introduced the quote so the narration
-    // chunk doesn't end on a dangling colon.
-    const cleanBefore = rawBefore.replace(/\s*[\uff1a:]\s*$/, '');
-    if (cleanBefore) chunks.push({ kind: 'narr', text: cleanBefore });
-    chunks.push({ kind: 'dialogue', text: content, speaker });
-    runningSpeaker = speaker;
-    cursor = span.end;
-  }
-  chunks.push({ kind: 'narr', text: narration.slice(cursor) });
-
-  const entries: NarrativeEntry[] = [];
-  let narrBuf = '';
-  const flushNarr = () => {
-    if (!narrBuf) return;
-    entries.push(...splitNarrationByLinePatterns(narrBuf, speakerSet));
-    narrBuf = '';
-  };
-  for (const chunk of chunks) {
-    if (chunk.kind === 'narr') {
-      narrBuf += chunk.text;
-    } else {
-      flushNarr();
-      entries.push({ id: uuid(), type: 'dialogue', speaker: chunk.speaker, content: chunk.text, timestamp: Date.now() });
-    }
-  }
-  flushNarr();
-  return entries;
-}
-
-/**
- * Line-level rescue for `[speaker] content` and `speaker："content"` patterns
- * — handles cases the inline-quote scanner doesn't, like a bare line of the
- * form "[弗兰克] 闭嘴！" or "弗兰克："闭嘴！"" standing alone.
- */
-function splitNarrationByLinePatterns(
-  narration: string,
-  speakerSet: Set<string>,
-): NarrativeEntry[] {
-  const entries: NarrativeEntry[] = [];
-  const lines = narration.split(/\r?\n/);
-  let narrBuf: string[] = [];
-  const flush = () => {
-    const text = narrBuf.join('\n').trim();
-    if (text) entries.push({ id: uuid(), type: 'narration', content: text, timestamp: Date.now() });
-    narrBuf = [];
-  };
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) { narrBuf.push(''); continue; }
-
-    // Pattern 1: [speaker] content  or  【speaker】 content
-    let m = trimmed.match(/^[[［【]\s*([^\]\]】]{1,12})\s*[\]］】]\s*[：:]?\s*(.+)$/);
-    if (m) {
-      const speaker = m[1].trim();
-      const content = stripQuotes(m[2]);
-      if (content) {
-        flush();
-        entries.push({ id: uuid(), type: 'dialogue', speaker, content, timestamp: Date.now() });
-        continue;
-      }
-    }
-
-    // Pattern 2: speaker[说|道|喊|问]?[：:"""「]"content"  — only trust known speakers
-    m = trimmed.match(/^([^\s：:"""「]{1,10})\s*(?:说|道|喊道?|问道?)?\s*[：:]\s*["""「](.+?)["""」]\s*[。！？!?.]?$/);
-    if (m) {
-      const speaker = m[1].trim();
-      if (speakerSet.has(speaker)) {
-        flush();
-        entries.push({ id: uuid(), type: 'dialogue', speaker, content: m[2].trim(), timestamp: Date.now() });
-        continue;
-      }
-    }
-
-    narrBuf.push(line);
-  }
-  flush();
-  return entries;
-}
-
-function stripQuotes(s: string): string {
-  return s.trim().replace(/^["'"『「]+|["'"』」]+$/g, '').trim();
-}
-
-/**
- * Strict-parse the response if possible, otherwise return null. Tries a
- * ```json fence first, then the first balanced JSON value, then the whole
- * cleaned string. Designed so callers can fall back to a forgiving parser
- * when strict parse fails.
- */
-function tryStrictParseResponse(cleaned: string): ParsedNarrationShape | null {
+  // Prefer explicit ```json fences, then fall back to 'first balanced JSON
+  // value in the buffer' (handles untagged preambles/outros), then last-
+  // resort the whole cleaned string.
   let jsonStr = cleaned.trim();
   const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
   if (fenced) jsonStr = fenced[1].trim();
@@ -639,91 +337,27 @@ function tryStrictParseResponse(cleaned: string): ParsedNarrationShape | null {
     const balanced = extractFirstBalancedJSON(cleaned);
     if (balanced) jsonStr = balanced;
   }
+
+  let parsed: { narration?: string; dialogues?: { speaker: string; content: string }[]; choices?: { text: string; isBranchPoint: boolean }[]; interactions?: { characterName: string; event: string; reaction: string; sentiment: string }[] };
   try {
-    return JSON.parse(jsonStr) as ParsedNarrationShape;
+    parsed = JSON.parse(jsonStr);
   } catch {
-    return null;
-  }
-}
-
-/**
- * Parse raw LLM JSON response into structured entries. Robust to malformed,
- * truncated, or quasi-JSON output: if strict parse fails we re-use the
- * streaming extractor (extractStreamingState) which tolerates unclosed
- * objects/arrays and still pulls out whatever narration + complete dialogues
- * are present. Only when both paths recover nothing do we render cleaned
- * text as raw narration.
- */
-export function parseNarrationResponse(raw: string, story: ParsedStory, playerInput: string) {
-  const cleaned = stripThinking(raw);
-
-  // Path A: strict JSON parse
-  let parsed = tryStrictParseResponse(cleaned);
-
-  // Path B: recovery via streaming extractor — handles truncation, trailing
-  // commas, mid-dialogue cutoffs, and other shapes that break JSON.parse.
-  if (!parsed) {
-    const streamState = extractStreamingState(cleaned);
-    if (streamState.narration || streamState.dialogues.length > 0) {
-      parsed = {
-        narration: streamState.narration || undefined,
-        // Only keep fully-formed dialogues; drop the trailing partial so the
-        // reader doesn't get a half-sentence bubble.
-        dialogues: streamState.dialogues
-          .filter(d => !d.partial && (d.speaker || d.content))
-          .map(d => ({ speaker: d.speaker, content: d.content })),
-      };
-    }
-  }
-
-  // Path C: nothing parseable at all — render cleaned text as a narration
-  // fallback and offer default choices so the player can still advance.
-  if (!parsed || (!parsed.narration && !(parsed.dialogues && parsed.dialogues.length > 0))) {
-    const fallbackText = (cleaned || raw).trim();
+    // Fallback: drop the raw buffer (thinking-stripped) as narration so at
+    // least something shows, but don't leak JSON scaffolding to the reader.
     return {
-      entries: [{
-        id: uuid(),
-        type: 'narration' as const,
-        content: fallbackText || '（模型返回了无法解析的内容）',
-        timestamp: Date.now(),
-        choices: [
-          { id: uuid(), text: '继续观察', isBranchPoint: false },
-          { id: uuid(), text: '与附近的人交谈', isBranchPoint: false },
-        ],
-      }],
+      entries: [{ id: uuid(), type: 'narration' as const, content: cleaned || raw, timestamp: Date.now(),
+        choices: [{ id: uuid(), text: '继续观察', isBranchPoint: false }, { id: uuid(), text: '与附近的人交谈', isBranchPoint: false }] }],
       interactions: [],
     };
   }
 
-  // Build roster of known speakers (story characters + player) to use as an
-  // allow-list when rescuing misplaced inline dialogue. Include '???' for
-  // the "mystery speaker" convention we allow in the prompt.
-  const knownSpeakers = [...story.characters.map(c => c.name), '???'];
-
   const entries: NarrativeEntry[] = [];
-  if (parsed.narration) {
-    // Rescue any dialogue the model accidentally inlined into narration,
-    // producing an interleaved sequence of narration + dialogue entries.
-    const rescued = rescueEntriesFromNarration(parsed.narration, knownSpeakers);
-    entries.push(...rescued);
-  }
+  if (parsed.narration) entries.push({ id: uuid(), type: 'narration', content: parsed.narration, timestamp: Date.now() });
   for (const d of parsed.dialogues || []) {
-    const speaker = (d.speaker || '').trim();
-    const content = (d.content || '').trim();
-    // Skip empty-content dialogues (e.g. a speaker tab with no line).
-    if (!content) continue;
-    entries.push({ id: uuid(), type: 'dialogue', speaker, content, timestamp: Date.now() });
+    entries.push({ id: uuid(), type: 'dialogue', speaker: d.speaker, content: d.content, timestamp: Date.now() });
   }
   const choices: StoryChoice[] = (parsed.choices || []).map(c => ({ id: uuid(), text: c.text, isBranchPoint: c.isBranchPoint }));
-  // If recovery path B gave us no choices, synthesize a pair of neutral ones
-  // so the turn isn't a dead end.
-  const finalChoices: StoryChoice[] = choices.length > 0
-    ? choices
-    : [
-        { id: uuid(), text: '继续观察', isBranchPoint: false },
-        { id: uuid(), text: '开口说些什么', isBranchPoint: false },
-      ];
-  if (entries.length > 0) entries[entries.length - 1].choices = finalChoices;
+  if (entries.length > 0 && choices.length > 0) entries[entries.length - 1].choices = choices;
 
   const interactions = (parsed.interactions || []).map(inter => {
     const char = story.characters.find(c => c.name === inter.characterName);
