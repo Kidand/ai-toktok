@@ -100,6 +100,16 @@ ${narrativeGuide}
   ]
 }
 
+## 对白归属规则（非常重要）
+- 任何角色说出口的话，**必须**放进 \`dialogues\` 数组，一条一个对象
+- **禁止**把对白写进 \`narration\` 字段。以下几种写法一律禁止：
+  - ✗ \`[弗兰克] 闭嘴，你这只死狗！\`
+  - ✗ \`弗兰克："闭嘴，你这只死狗！"\`
+  - ✗ \`弗兰克说：闭嘴。\`（连同角色名 + 冒号 + 台词的任何变体）
+- narration 字段只写：环境描写、角色动作、心理活动、第三人称叙事，不含任何直接引语
+- 每一条 \`dialogues\` 条目的 \`speaker\` 必须是上面"角色列表"中已出现的名字或玩家角色名；如果是神秘的未揭示者，用 "???" 作为 speaker 并在 narration 里描写其外形/声音
+- \`dialogues\` 条目的 \`content\` 不能为空字符串——没话可说就不要出这个条目
+
 注意：choices 提供 2-3 个选项（都要是具体行动）；interactions 记录本轮有反应的角色。`;
 }
 
@@ -330,6 +340,68 @@ type ParsedNarrationShape = {
 };
 
 /**
+ * Models sometimes collapse dialogue lines into the narration field in
+ * script-style shorthand — "[弗兰克] 闭嘴！", "弗兰克："闭嘴！"", or
+ * "弗兰克说：闭嘴". Walk the narration line-by-line and pull those out
+ * as real dialogue entries, preserving positional order so the reader
+ * sees prose and dialogue interleaved as the model intended.
+ *
+ * Known speakers (roster + player) are used as an allow-list for the
+ * looser `name：xxx` pattern so regular prose ("她走到窗边：外面……")
+ * doesn't get accidentally mis-identified.
+ */
+function rescueEntriesFromNarration(
+  narration: string,
+  knownSpeakers: string[],
+): NarrativeEntry[] {
+  const entries: NarrativeEntry[] = [];
+  const speakerSet = new Set(knownSpeakers.filter(Boolean));
+  const lines = narration.split(/\r?\n/);
+  let narrBuf: string[] = [];
+  const flushNarr = () => {
+    const text = narrBuf.join('\n').trim();
+    if (text) entries.push({ id: uuid(), type: 'narration', content: text, timestamp: Date.now() });
+    narrBuf = [];
+  };
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) { narrBuf.push(''); continue; }
+
+    // Pattern 1: [speaker] content  or  【speaker】 content
+    let m = trimmed.match(/^[[［【]\s*([^\]\]】]{1,12})\s*[\]］】]\s*[：:]?\s*(.+)$/);
+    if (m) {
+      const speaker = m[1].trim();
+      const content = stripQuotes(m[2]);
+      if (content) {
+        flushNarr();
+        entries.push({ id: uuid(), type: 'dialogue', speaker, content, timestamp: Date.now() });
+        continue;
+      }
+    }
+
+    // Pattern 2: speaker[说|道|喊|问]?[：:"""「]"content"  — only trust known speakers
+    m = trimmed.match(/^([^\s：:"""「]{1,10})\s*(?:说|道|喊道?|问道?)?\s*[：:]\s*["""「](.+?)["""」]\s*[。！？!?.]?$/);
+    if (m) {
+      const speaker = m[1].trim();
+      if (speakerSet.has(speaker)) {
+        flushNarr();
+        entries.push({ id: uuid(), type: 'dialogue', speaker, content: m[2].trim(), timestamp: Date.now() });
+        continue;
+      }
+    }
+
+    narrBuf.push(line);
+  }
+  flushNarr();
+  return entries;
+}
+
+function stripQuotes(s: string): string {
+  return s.trim().replace(/^["'"『「]+|["'"』」]+$/g, '').trim();
+}
+
+/**
  * Strict-parse the response if possible, otherwise return null. Tries a
  * ```json fence first, then the first balanced JSON value, then the whole
  * cleaned string. Designed so callers can fall back to a forgiving parser
@@ -399,10 +471,24 @@ export function parseNarrationResponse(raw: string, story: ParsedStory, playerIn
     };
   }
 
+  // Build roster of known speakers (story characters + player) to use as an
+  // allow-list when rescuing misplaced inline dialogue. Include '???' for
+  // the "mystery speaker" convention we allow in the prompt.
+  const knownSpeakers = [...story.characters.map(c => c.name), '???'];
+
   const entries: NarrativeEntry[] = [];
-  if (parsed.narration) entries.push({ id: uuid(), type: 'narration', content: parsed.narration, timestamp: Date.now() });
+  if (parsed.narration) {
+    // Rescue any dialogue the model accidentally inlined into narration,
+    // producing an interleaved sequence of narration + dialogue entries.
+    const rescued = rescueEntriesFromNarration(parsed.narration, knownSpeakers);
+    entries.push(...rescued);
+  }
   for (const d of parsed.dialogues || []) {
-    entries.push({ id: uuid(), type: 'dialogue', speaker: d.speaker, content: d.content, timestamp: Date.now() });
+    const speaker = (d.speaker || '').trim();
+    const content = (d.content || '').trim();
+    // Skip empty-content dialogues (e.g. a speaker tab with no line).
+    if (!content) continue;
+    entries.push({ id: uuid(), type: 'dialogue', speaker, content, timestamp: Date.now() });
   }
   const choices: StoryChoice[] = (parsed.choices || []).map(c => ({ id: uuid(), text: c.text, isBranchPoint: c.isBranchPoint }));
   // If recovery path B gave us no choices, synthesize a pair of neutral ones
