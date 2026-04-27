@@ -10,15 +10,38 @@
  *   4. 全部处理完后做一次小型 LLM 润色，生成统一 title/summary/timeline
  */
 
+import { createStore, get as idbGet, set as idbSet, keys as idbKeys, clear as idbClear } from 'idb-keyval';
 import { callLLMBrowser, streamLLMBrowser } from './llm-browser';
 import { stripThinking, extractFirstBalancedJSON } from './narrator-browser';
-import { LLMConfig, ParsedStory, Character, Location, KeyEvent, WorldSetting } from './types';
+import { logEvent } from './telemetry';
+import {
+  INITIAL_PARSE_PROMPT,
+  buildIncrementalPrompt,
+  POLISH_SYSTEM_PROMPT,
+} from './prompts';
+import {
+  LLMConfig, ParsedStory, Character, Location, KeyEvent, WorldSetting,
+  WorldEntity, Faction, Relationship, LoreEntry, TimelineEvent, IPProject,
+} from './types';
 import { v4 as uuid } from 'uuid';
 
 const CHUNK_MAX_CHARS = 24000;
 const MAX_RETRIES = 3;
-const PROMPT_VERSION = '4'; // bump invalidates all prior caches
+// Bump PROMPT_VERSION whenever the extraction prompt's expected output shape
+// changes — the snapshot cache key embeds it, so old in-progress runs are
+// not resumed against a new schema. v5 added factions / loreEntries /
+// conflicts / event causes & consequences (Phase 2).
+const PROMPT_VERSION = '5';
 const CACHE_PREFIX = 'ai-toktok-graph-cache:';
+const CACHE_DB = 'ai-toktok';
+const CACHE_STORE = 'graphCache';
+
+// In Node (build-preset script) we transparently fall back to no caching, just
+// like the legacy localStorage path did. `idb-keyval` requires `indexedDB`
+// which Node doesn't ship.
+const cacheDB = typeof indexedDB !== 'undefined'
+  ? createStore(CACHE_DB, CACHE_STORE)
+  : null;
 
 // -----------------------------------------------------------------------------
 // Types
@@ -32,6 +55,19 @@ type RawLocation = { name: string; description?: string };
 type RawEvent = {
   title: string; description: string; timeIndex?: number;
   involvedCharacters?: string[]; locationName?: string;
+  causes?: string[]; consequences?: string[];
+};
+type RawFaction = {
+  name: string; description?: string; ideology?: string;
+  members?: string[]; rivals?: string[];
+};
+type RawLoreEntry = {
+  title: string; content: string; tags?: string[];
+  relatedNames?: string[]; importance?: number;
+};
+type RawConflict = {
+  title: string; description?: string; involvedNames?: string[];
+  stage?: string; intensity?: number;
 };
 type RawWorldSetting = {
   era?: string; genre?: string; rules?: string[]; toneDescription?: string;
@@ -45,6 +81,9 @@ type Graph = {
   characters: RawCharacter[];
   locations: RawLocation[];
   keyEvents: RawEvent[];
+  factions: RawFaction[];
+  loreEntries: RawLoreEntry[];
+  conflicts: RawConflict[];
   timelineDescription?: string;
 };
 
@@ -56,6 +95,9 @@ type ChunkParseResult = {
   updatedCharacters?: RawCharacter[];  // name matches an existing one
   newLocations?: RawLocation[];
   keyEvents?: RawEvent[];
+  newFactions?: RawFaction[];
+  newLoreEntries?: RawLoreEntry[];
+  newConflicts?: RawConflict[];
   timelineDescription?: string;
 };
 
@@ -68,106 +110,7 @@ export type ParseProgress = {
   characters?: number;    // running character count (for UX)
 };
 
-// -----------------------------------------------------------------------------
-// Prompts
-// -----------------------------------------------------------------------------
-
-const INITIAL_PARSE_PROMPT = `你是一个专业的故事分析AI。解析用户提供的故事文本片段，提取关键信息。
-必须返回严格JSON，不要任何其他文字：
-
-{
-  "title": "（猜测）故事标题",
-  "summary": "本片段梗概（100-200字）",
-  "worldSetting": {
-    "era": "时代背景",
-    "genre": "故事类型",
-    "rules": ["世界规则1", "世界规则2"],
-    "toneDescription": "叙事风格"
-  },
-  "newCharacters": [
-    { "name": "角色名", "description": "外貌及身份", "personality": "性格", "background": "背景",
-      "relationships": [{ "targetName": "关联角色名", "relation": "关系" }] }
-  ],
-  "newLocations": [ { "name": "地点名", "description": "描述" } ],
-  "keyEvents": [
-    { "title": "事件标题", "description": "描述", "timeIndex": 0,
-      "involvedCharacters": ["角色名"], "locationName": "地点名" }
-  ],
-  "timelineDescription": "本片段时间线"
-}
-
-注意：
-- 提取所有有名字的角色
-- **必须包含视角人物/主角**（即使故事以第一人称"我"叙述，或用"他/她"代称而极少提及真名）。
-  · 若主角有名字，直接用其名字
-  · 若主角全程无名，使用"主角"作为 name，并在 description 里写明"故事的第一人称视角人物"
-  · 视角人物通常是玩家最可能想扮演的角色，不能遗漏
-- keyEvents 按时间顺序排列`;
-
-function buildIncrementalPrompt(graph: Graph): string {
-  const charList = graph.characters.length === 0
-    ? '（暂无）'
-    : graph.characters.map(c => `- ${c.name}：${c.description || '（无描述）'}`).join('\n');
-  const locList = graph.locations.length === 0
-    ? '（暂无）'
-    : graph.locations.map(l => `- ${l.name}`).join('\n');
-  const worldInfo = [
-    graph.worldSetting.era && `时代：${graph.worldSetting.era}`,
-    graph.worldSetting.genre && `类型：${graph.worldSetting.genre}`,
-    graph.worldSetting.toneDescription && `风格：${graph.worldSetting.toneDescription}`,
-    graph.worldSetting.rules && graph.worldSetting.rules.length > 0 && `规则：${graph.worldSetting.rules.join('；')}`,
-  ].filter(Boolean).join('\n') || '（暂无）';
-
-  return `你是一个专业的故事分析AI。解析新的故事片段，**在已有图谱基础上增量更新**。
-
-## 当前已知图谱
-
-### 已知角色（主名）
-${charList}
-
-### 已知地点
-${locList}
-
-### 已知世界观
-${worldInfo}
-
-## 任务
-
-阅读新的片段，按以下规则输出JSON：
-
-1. **已知角色**出现时（可能用别名、称号、代称如"他/她/那人"指代），使用上面列出的**主名**。
-   在 \`updatedCharacters\` 中仅提供**新增或变化**的字段（比如新的背景细节、性格侧面）。
-2. **新角色**放在 \`newCharacters\`，完整填写所有字段。**特别注意**：如果本片段出现了之前片段未识别到的视角人物/主角（第一人称"我"或代称"他/她"），务必作为新角色添加；若无名字用"主角"作为 name。
-3. **新地点**放在 \`newLocations\`；已知地点不必重复。
-4. **keyEvents**：本片段发生的关键事件，\`involvedCharacters\` 里的名字必须使用主名（已知）或新角色名。
-5. **worldSetting**：只填本片段**新发现或矛盾**的规则/时代/风格信息，其他留空。
-6. **summary** 和 **timelineDescription**：只描述本片段内容。
-
-必须返回严格JSON，不要其他文字：
-
-{
-  "summary": "本片段梗概",
-  "worldSetting": { "era": "", "genre": "", "rules": [], "toneDescription": "" },
-  "updatedCharacters": [
-    { "name": "使用主名", "description": "（补充新信息）", "personality": "", "background": "",
-      "relationships": [{ "targetName": "", "relation": "" }] }
-  ],
-  "newCharacters": [ /* 同 updatedCharacters 但是新角色，全部字段必填 */ ],
-  "newLocations": [ { "name": "", "description": "" } ],
-  "keyEvents": [ { "title": "", "description": "", "timeIndex": 0, "involvedCharacters": [], "locationName": "" } ],
-  "timelineDescription": "本片段时间线"
-}`;
-}
-
-const POLISH_SYSTEM_PROMPT = `你收到一份整合后的故事图谱（角色/地点/事件/世界观），基于它生成统一的叙事级信息。
-返回严格JSON：
-{
-  "title": "故事统一标题",
-  "summary": "整体故事梗概（200-400字，流畅连贯）",
-  "toneDescription": "整体叙事风格（一句话）",
-  "timelineDescription": "完整时间线描述（按事件顺序串联的叙述）"
-}
-只返回JSON，不要其他文字。`;
+// Prompts live in src/lib/prompts/world-extraction.ts. They are imported above.
 
 // -----------------------------------------------------------------------------
 // Utilities
@@ -223,17 +166,17 @@ function snapshotCacheKey(fullTextHash: string, modelId: string, chunkIndex: num
   return `${CACHE_PREFIX}${PROMPT_VERSION}:${modelId}:${fullTextHash}:${chunkIndex}`;
 }
 
-function readSnapshot(key: string): Graph | null {
-  if (typeof window === 'undefined') return null;
+async function readSnapshot(key: string): Promise<Graph | null> {
+  if (!cacheDB) return null;
   try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : null;
+    const snap = await idbGet<Graph>(key, cacheDB);
+    return snap ?? null;
   } catch { return null; }
 }
 
-function writeSnapshot(key: string, graph: Graph): void {
-  if (typeof window === 'undefined') return;
-  try { localStorage.setItem(key, JSON.stringify(graph)); }
+async function writeSnapshot(key: string, graph: Graph): Promise<void> {
+  if (!cacheDB) return;
+  try { await idbSet(key, graph, cacheDB); }
   catch { /* quota exceeded; parsing still works */ }
 }
 
@@ -270,6 +213,9 @@ function emptyGraph(): Graph {
     characters: [],
     locations: [],
     keyEvents: [],
+    factions: [],
+    loreEntries: [],
+    conflicts: [],
   };
 }
 
@@ -390,8 +336,88 @@ function applyChunkUpdate(graph: Graph, chunk: ChunkParseResult, chunkIndex: num
       ...e,
       title,
       timeIndex: chunkIndex * 10000 + localIdx,
+      causes: e.causes || [],
+      consequences: e.consequences || [],
     });
     existingTitles.add(title);
+  }
+
+  // Factions: dedup by name; merge member/rival lists.
+  const factionByName = new Map(graph.factions.map(f => [f.name, f]));
+  for (const f of chunk.newFactions || []) {
+    const key = f.name?.trim();
+    if (!key) continue;
+    const existing = factionByName.get(key);
+    if (!existing) {
+      graph.factions.push({
+        name: key,
+        description: f.description || '',
+        ideology: f.ideology || '',
+        members: [...(f.members || [])],
+        rivals: [...(f.rivals || [])],
+      });
+      factionByName.set(key, graph.factions[graph.factions.length - 1]);
+    } else {
+      existing.description = appendDistinct(existing.description, f.description);
+      existing.ideology = appendDistinct(existing.ideology, f.ideology);
+      const memberSet = new Set(existing.members || []);
+      for (const m of f.members || []) {
+        if (m && !memberSet.has(m)) {
+          existing.members = [...(existing.members || []), m];
+          memberSet.add(m);
+        }
+      }
+      const rivalSet = new Set(existing.rivals || []);
+      for (const r of f.rivals || []) {
+        if (r && !rivalSet.has(r)) {
+          existing.rivals = [...(existing.rivals || []), r];
+          rivalSet.add(r);
+        }
+      }
+    }
+  }
+
+  // Lore entries: dedup by title; later entries with longer content win.
+  const loreByTitle = new Map(graph.loreEntries.map(l => [l.title, l]));
+  for (const l of chunk.newLoreEntries || []) {
+    const key = l.title?.trim();
+    if (!key || !l.content) continue;
+    const existing = loreByTitle.get(key);
+    if (!existing) {
+      graph.loreEntries.push({
+        title: key,
+        content: l.content,
+        tags: [...(l.tags || [])],
+        relatedNames: [...(l.relatedNames || [])],
+        importance: typeof l.importance === 'number' ? l.importance : 3,
+      });
+      loreByTitle.set(key, graph.loreEntries[graph.loreEntries.length - 1]);
+    } else if ((l.content || '').length > (existing.content || '').length) {
+      existing.content = l.content;
+    }
+  }
+
+  // Conflicts: dedup by title; later stages override (story progresses).
+  const conflictByTitle = new Map(graph.conflicts.map(c => [c.title, c]));
+  for (const c of chunk.newConflicts || []) {
+    const key = c.title?.trim();
+    if (!key) continue;
+    const existing = conflictByTitle.get(key);
+    if (!existing) {
+      graph.conflicts.push({
+        title: key,
+        description: c.description || '',
+        involvedNames: [...(c.involvedNames || [])],
+        stage: c.stage || 'latent',
+        intensity: typeof c.intensity === 'number' ? c.intensity : 0,
+      });
+      conflictByTitle.set(key, graph.conflicts[graph.conflicts.length - 1]);
+    } else {
+      // Stage progression: later chunks reflect later story state.
+      if (c.stage) existing.stage = c.stage;
+      if (typeof c.intensity === 'number') existing.intensity = c.intensity;
+      existing.description = appendDistinct(existing.description, c.description);
+    }
   }
 
   // Timeline + summary: append per-chunk descriptions (polished later)
@@ -446,7 +472,11 @@ async function parseChunkIncremental(
     ? `（这是第 ${chunkIndex + 1}/${total} 段）\n\n${chunk}`
     : chunk;
 
-  const maxTokens = chunkIndex === 0 && total === 1 ? 8192 : 4096;
+  // Long novels (e.g. 三国演义 ~60 万字 / 26 片) routinely produce chunks with
+  // 5-10 new named characters plus long event descriptions. 4096 tokens of
+  // output truncates JSON mid-string, all 3 retries fail, and the entire parse
+  // dies. 8192 gives safe headroom for any chunk size.
+  const maxTokens = 8192;
 
   return withRetry(async () => {
     let full = '';
@@ -483,6 +513,9 @@ function normalizeFirstChunk(raw: ChunkParseResult & { characters?: RawCharacter
     updatedCharacters: [],
     newLocations: raw.locations || raw.newLocations || [],
     keyEvents: raw.keyEvents || [],
+    newFactions: raw.newFactions || [],
+    newLoreEntries: raw.newLoreEntries || [],
+    newConflicts: raw.newConflicts || [],
     timelineDescription: raw.timelineDescription,
   };
 }
@@ -508,7 +541,7 @@ export async function parseStoryClient(
   let startIndex = 0;
   let resumedFrom: number | undefined;
   for (let i = total - 1; i >= 0; i--) {
-    const snap = readSnapshot(snapshotCacheKey(fullTextHash, modelId, i));
+    const snap = await readSnapshot(snapshotCacheKey(fullTextHash, modelId, i));
     if (snap) {
       graph = snap;
       startIndex = i + 1;
@@ -523,6 +556,7 @@ export async function parseStoryClient(
   });
 
   for (let i = startIndex; i < total; i++) {
+    logEvent('parser.chunk_start', { chunkIndex: i, total });
     const chunkResult = await parseChunkIncremental(
       config, chunks[i], i, total, graph,
       (frac) => onProgress?.({
@@ -538,7 +572,16 @@ export async function parseStoryClient(
     const normalized = i === 0 ? normalizeFirstChunk(chunkResult) : chunkResult;
     graph = applyChunkUpdate(graph, normalized, i);
 
-    writeSnapshot(snapshotCacheKey(fullTextHash, modelId, i), cloneGraph(graph));
+    await writeSnapshot(snapshotCacheKey(fullTextHash, modelId, i), cloneGraph(graph));
+
+    logEvent('parser.chunk_done', {
+      chunkIndex: i,
+      characters: graph.characters.length,
+      locations: graph.locations.length,
+      events: graph.keyEvents.length,
+      factions: graph.factions.length,
+      lore: graph.loreEntries.length,
+    });
 
     onProgress?.({
       phase: 'parse', current: i + 1, total,
@@ -576,7 +619,9 @@ export async function parseStoryClient(
       graph.worldSetting.toneDescription = polished.toneDescription || graph.worldSetting.toneDescription;
     } catch (err) {
       console.warn('Polish step failed, using accumulated graph as-is:', err);
+      logEvent('parser.error', { stage: 'polish', error: String(err) });
     }
+    logEvent('parser.polish', { ok: true, title: graph.title });
   }
 
   onProgress?.({ phase: 'build', current: 1, total: 1 });
@@ -584,19 +629,16 @@ export async function parseStoryClient(
 }
 
 /** Clear all incremental graph snapshots. */
-export function clearChunkCache(): number {
-  if (typeof window === 'undefined') return 0;
-  const keys: string[] = [];
-  for (let i = 0; i < localStorage.length; i++) {
-    const k = localStorage.key(i);
-    if (k && k.startsWith(CACHE_PREFIX)) keys.push(k);
-  }
-  keys.forEach(k => localStorage.removeItem(k));
-  return keys.length;
+export async function clearChunkCache(): Promise<number> {
+  if (!cacheDB) return 0;
+  const all = await idbKeys(cacheDB);
+  await idbClear(cacheDB);
+  return all.length;
 }
 
 function buildParsedStory(graph: Graph, originalText: string): ParsedStory {
   const storyId = uuid();
+  const projectId = storyId; // 1:1 with story for now; Phase 7 may decouple.
 
   const characters: Character[] = graph.characters.map(c => ({
     id: uuid(), name: c.name, description: c.description || '',
@@ -631,9 +673,223 @@ function buildParsedStory(graph: Graph, originalText: string): ParsedStory {
     toneDescription: graph.worldSetting.toneDescription || '',
   };
 
+  // ---- Phase 2 derived tables (additive; legacy arrays above remain
+  //      authoritative for runtime).
+  const entities = buildEntities(projectId, graph, characters, locations, keyEvents);
+  const relationships = buildRelationships(projectId, graph, nameToId);
+  const factions = buildFactions(projectId, graph);
+  const loreEntries = buildLorebook(projectId, graph, nameToId);
+  const timelineEvents = buildTimeline(projectId, graph, keyEvents);
+  const project: IPProject = {
+    id: projectId,
+    title: graph.title || '未命名故事',
+    description: graph.summary || '',
+    sourceType: 'paste',
+    status: 'built',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    buildConfig: {},
+  };
+
   return {
     id: storyId, title: graph.title || '未命名故事', originalText,
     summary: graph.summary || '', worldSetting, characters, locations, keyEvents,
     timelineDescription: graph.timelineDescription || '',
+    project, entities, relationships, factions, loreEntries, timelineEvents,
   };
+}
+
+// =============================================================================
+// Phase 2 · Derived-table builders
+// =============================================================================
+
+/**
+ * Lift the legacy arrays + factions into a unified WorldEntity table.
+ * Each character/location/event/faction gets one record, importance scored
+ * heuristically (mention count for characters, raw length for descriptions).
+ */
+function buildEntities(
+  projectId: string,
+  graph: Graph,
+  characters: Character[],
+  locations: Location[],
+  keyEvents: KeyEvent[],
+): WorldEntity[] {
+  const entities: WorldEntity[] = [];
+  for (const c of characters) {
+    entities.push({
+      id: c.id, projectId, name: c.name, type: 'character',
+      description: c.description,
+      importance: scoreCharacterImportance(c, graph),
+    });
+  }
+  for (const l of locations) {
+    entities.push({
+      id: l.id, projectId, name: l.name, type: 'location',
+      description: l.description, importance: 2,
+    });
+  }
+  for (const f of graph.factions) {
+    entities.push({
+      id: uuid(), projectId, name: f.name, type: 'faction',
+      description: f.description || '', importance: 3,
+    });
+  }
+  for (const e of keyEvents) {
+    entities.push({
+      id: e.id, projectId, name: e.title, type: 'event',
+      description: e.description, importance: 3,
+    });
+  }
+  return entities;
+}
+
+/**
+ * Heuristic 1..5 importance score. Player-facing UI uses this to sort the
+ * cast and to feed L0/L1 of the context injector in Phase 4.
+ */
+function scoreCharacterImportance(c: Character, graph: Graph): number {
+  const eventCount = graph.keyEvents.filter(
+    e => (e.involvedCharacters || []).includes(c.name),
+  ).length;
+  const score = 1
+    + Math.min(2, eventCount)
+    + (c.background && c.background.length > 80 ? 1 : 0)
+    + ((c.relationships?.length || 0) >= 2 ? 1 : 0);
+  return Math.max(1, Math.min(5, score));
+}
+
+/**
+ * Top-level relationship table. Lifts each character.relationships[] entry
+ * into a directed Relationship record. Polarity is initially 0 (neutral);
+ * Phase 5 StateDelta application updates it during play.
+ */
+function buildRelationships(
+  projectId: string,
+  graph: Graph,
+  nameToId: Map<string, string>,
+): Relationship[] {
+  const out: Relationship[] = [];
+  for (const c of graph.characters) {
+    const sourceId = nameToId.get(c.name);
+    if (!sourceId || !c.relationships) continue;
+    for (const r of c.relationships) {
+      const targetId = nameToId.get(r.targetName);
+      if (!targetId) continue;
+      out.push({
+        id: uuid(), projectId,
+        sourceEntityId: sourceId,
+        targetEntityId: targetId,
+        relationType: r.relation,
+        polarity: 0,
+        strength: 0.5,
+      });
+    }
+  }
+  return out;
+}
+
+function buildFactions(projectId: string, graph: Graph): Faction[] {
+  return graph.factions.map(f => ({
+    id: uuid(), projectId,
+    name: f.name,
+    description: f.description || '',
+    ideology: f.ideology || '',
+    memberEntityIds: [],   // names → ids resolved later if needed
+    rivals: f.rivals || [],
+  }));
+}
+
+/**
+ * Build the lorebook. Sources:
+ *   1. Each `worldSetting.rules[]` becomes a high-importance LoreEntry.
+ *   2. Each LLM-emitted `loreEntries[]` is taken verbatim.
+ *   3. Each faction description becomes a medium-importance entry.
+ *
+ * `triggerKeywords` are auto-derived from the title + any related names so
+ * the L4 keyword scanner (Phase 4) can re-introduce the entry on demand.
+ */
+function buildLorebook(
+  projectId: string,
+  graph: Graph,
+  nameToId: Map<string, string>,
+): LoreEntry[] {
+  const out: LoreEntry[] = [];
+
+  for (const rule of graph.worldSetting.rules || []) {
+    if (!rule.trim()) continue;
+    out.push({
+      id: uuid(), projectId,
+      title: rule.length > 16 ? rule.slice(0, 16) + '…' : rule,
+      content: rule,
+      importance: 5,
+      triggerKeywords: deriveKeywords(rule),
+    });
+  }
+
+  for (const l of graph.loreEntries) {
+    const relatedIds = (l.relatedNames || [])
+      .map(n => nameToId.get(n))
+      .filter((id): id is string => Boolean(id));
+    out.push({
+      id: uuid(), projectId,
+      title: l.title,
+      content: l.content,
+      tags: l.tags || [],
+      relatedEntityIds: relatedIds,
+      importance: typeof l.importance === 'number' ? l.importance : 3,
+      triggerKeywords: deriveKeywords(l.title, l.relatedNames || [], l.tags || []),
+    });
+  }
+
+  for (const f of graph.factions) {
+    if (!f.description) continue;
+    out.push({
+      id: uuid(), projectId,
+      title: f.name,
+      content: `${f.name}：${f.description}${f.ideology ? `。理念：${f.ideology}` : ''}`,
+      importance: 3,
+      triggerKeywords: [f.name, ...(f.members || []), ...(f.rivals || [])],
+    });
+  }
+
+  return out;
+}
+
+/**
+ * Pull the keyword set the L4 scanner uses to re-trigger this lore entry.
+ * Falls back to the title token itself when no extras are supplied.
+ */
+function deriveKeywords(title: string, ...extras: (string[] | string)[]): string[] {
+  const set = new Set<string>();
+  if (title) set.add(title.trim());
+  for (const e of extras) {
+    if (Array.isArray(e)) for (const v of e) { if (v) set.add(v); }
+    else if (e) set.add(e);
+  }
+  return [...set].filter(Boolean);
+}
+
+/**
+ * Build the causal TimelineEvent table from the legacy keyEvents +
+ * LLM-emitted causes/consequences. Order is the timeIndex assigned during
+ * merge (chunkIndex * 10000 + localIndex), then renumbered on flatten.
+ */
+function buildTimeline(
+  projectId: string,
+  graph: Graph,
+  keyEvents: KeyEvent[],
+): TimelineEvent[] {
+  const idToKE = new Map(keyEvents.map(e => [e.title, e.id]));
+  return graph.keyEvents.map((e, idx) => ({
+    id: idToKE.get(e.title) || uuid(),
+    projectId,
+    title: e.title,
+    description: e.description,
+    orderIndex: idx,
+    participants: e.involvedCharacters || [],
+    locations: e.locationName ? [e.locationName] : [],
+    causes: e.causes || [],
+    consequences: e.consequences || [],
+  }));
 }

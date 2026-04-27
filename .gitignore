@@ -22,3 +22,7 @@ yarn-debug.log*
 next-env.d.ts
 .vercel
 .claude/
+
+# local-only design docs (kept out of the public repo)
+blueprint.md
+REFACTOR_PROGRESS.md

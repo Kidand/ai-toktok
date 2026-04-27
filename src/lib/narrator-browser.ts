@@ -2,116 +2,229 @@
 
 import { callLLMBrowser, streamLLMBrowser } from './llm-browser';
 import {
+  buildWorldSystemPrompt as buildWorldSystemPromptTpl,
+  buildHistoryContext,
+  MENTION_HINT_TEMPLATE,
+  CHOICE_HINT,
+  buildSystemHintPrompt,
+  EPILOGUE_SYSTEM_PROMPT,
+  buildEpilogueUserMessage,
+  REINCARNATION_SYSTEM_PROMPT,
+  buildReincarnationUserMessage,
+  STORY_ARC_SYSTEM_PROMPT,
+  buildStoryArcUserMessage,
+  type RenderedSelection,
+} from './prompts';
+import {
+  Character, InjectionConfig,
   LLMConfig, ParsedStory, PlayerConfig, GuardrailParams,
   NarrativeBalance, NarrativeEntry, StoryChoice,
+  CharacterInteraction, StoryArcStats, StoryArcReport, EpilogueEntry,
 } from './types';
 import { v4 as uuid } from 'uuid';
+
+export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
+  mode: 'smart',
+  windowSize: 5,
+  expandDepth: 1,
+  maxTriggered: 8,
+};
+
+/**
+ * Per-call breakdown of which characters/locations were elevated to detailed
+ * injection vs left in the roster. Returned alongside the prompt so the caller
+ * can log telemetry (we don't expose this to the player UI by design — leaking
+ * the trigger trace would spoil hidden lore).
+ */
+export interface LoreInjectionTrace {
+  mode: InjectionConfig['mode'];
+  detailed: string[];
+  roster: string[];
+  locations: string[];
+  reasons: {
+    constant: string[];
+    mention: string[];
+    input: string[];
+    recent: string[];
+    expanded: string[];
+  };
+}
+
+interface LoreSelection {
+  detailedCharIds: Set<string>;
+  rosterCharIds: Set<string>;
+  detailedLocationIds: Set<string>;
+  trace: LoreInjectionTrace;
+}
+
+/**
+ * Decide which characters and locations get full detail this turn.
+ *
+ * `full` mode reproduces the legacy behavior — all non-player characters with
+ * their personality+background, every location injected. Use it as a kill
+ * switch if smart selection misbehaves.
+ *
+ * `smart` mode walks four tiers, stopping when `maxTriggered` is reached:
+ *   1. Constant — the player's directly related characters (their own
+ *      `relationships`, capped at 3). These never miss.
+ *   2. Triggered — names appearing in the explicit @ mention list, then in
+ *      `playerInput`, then in the last `windowSize` narrative entries.
+ *   3. Expanded — 1-degree neighbors of the triggered set via
+ *      `relationships`. Skipped when `expandDepth = 0`.
+ *   4. Roster — every remaining non-player character gets a single-line
+ *      `【name】description` so the LLM still recognizes them by name.
+ *
+ * Locations follow a simpler rule: triggered by name match in the same scan
+ * text; un-triggered locations are dropped entirely (the legacy code never
+ * injected locations at all, so this is a strict gain).
+ */
+function selectActiveLore(
+  story: ParsedStory,
+  playerChar: Character | undefined,
+  history: NarrativeEntry[],
+  playerInput: string,
+  mentioned: string[] | undefined,
+  config: InjectionConfig,
+): LoreSelection {
+  const charsByName = new Map<string, Character>();
+  const charsById = new Map<string, Character>();
+  for (const c of story.characters) {
+    if (playerChar && c.id === playerChar.id) continue;
+    if (c.name) charsByName.set(c.name, c);
+    charsById.set(c.id, c);
+  }
+
+  const reasons = {
+    constant: [] as string[],
+    mention: [] as string[],
+    input: [] as string[],
+    recent: [] as string[],
+    expanded: [] as string[],
+  };
+
+  if (config.mode === 'full') {
+    const detailedCharIds = new Set(charsById.keys());
+    const detailedLocationIds = new Set(story.locations.map(l => l.id));
+    return {
+      detailedCharIds,
+      rosterCharIds: new Set(),
+      detailedLocationIds,
+      trace: {
+        mode: 'full',
+        detailed: [...charsById.values()].map(c => c.name),
+        roster: [],
+        locations: story.locations.map(l => l.name),
+        reasons,
+      },
+    };
+  }
+
+  const detailedIds = new Set<string>();
+  const addById = (id: string, bucket: keyof typeof reasons) => {
+    if (!charsById.has(id) || detailedIds.has(id)) return;
+    if (detailedIds.size >= config.maxTriggered) return;
+    detailedIds.add(id);
+    reasons[bucket].push(charsById.get(id)!.name);
+  };
+
+  if (playerChar?.relationships) {
+    for (const rel of playerChar.relationships.slice(0, 3)) {
+      addById(rel.characterId, 'constant');
+    }
+  }
+
+  const recentEntries = history.slice(-config.windowSize);
+  const recentText = recentEntries
+    .map(e => `${e.speaker || ''} ${e.content || ''}`)
+    .join(' ');
+
+  if (mentioned) {
+    for (const name of mentioned) {
+      const c = charsByName.get(name);
+      if (c) addById(c.id, 'mention');
+    }
+  }
+  for (const c of charsByName.values()) {
+    if (playerInput.includes(c.name)) addById(c.id, 'input');
+  }
+  for (const c of charsByName.values()) {
+    if (recentText.includes(c.name)) addById(c.id, 'recent');
+  }
+
+  if (config.expandDepth >= 1) {
+    const seeds = [...detailedIds];
+    outer: for (const seedId of seeds) {
+      const seed = charsById.get(seedId);
+      if (!seed?.relationships) continue;
+      for (const rel of seed.relationships) {
+        if (detailedIds.size >= config.maxTriggered) break outer;
+        addById(rel.characterId, 'expanded');
+      }
+    }
+  }
+
+  const rosterIds = new Set<string>();
+  for (const id of charsById.keys()) {
+    if (!detailedIds.has(id)) rosterIds.add(id);
+  }
+
+  const detailedLocationIds = new Set<string>();
+  const locScanText = recentText + ' ' + playerInput;
+  const triggeredLocations: string[] = [];
+  for (const loc of story.locations) {
+    if (loc.name && locScanText.includes(loc.name)) {
+      detailedLocationIds.add(loc.id);
+      triggeredLocations.push(loc.name);
+    }
+  }
+
+  return {
+    detailedCharIds: detailedIds,
+    rosterCharIds: rosterIds,
+    detailedLocationIds,
+    trace: {
+      mode: 'smart',
+      detailed: [...detailedIds].map(id => charsById.get(id)?.name || id),
+      roster: [...rosterIds].map(id => charsById.get(id)?.name || id),
+      locations: triggeredLocations,
+      reasons,
+    },
+  };
+}
+
+/**
+ * Render the LoreSelection into the string fragments the prompt template needs,
+ * then call the prompt template. Keeps selection logic here (it's runtime
+ * state) and prompt phrasing in src/lib/prompts/dialogue-runtime.ts.
+ */
+function renderSelection(story: ParsedStory, selection: LoreSelection): RenderedSelection {
+  const detailedChars = story.characters.filter(c => selection.detailedCharIds.has(c.id));
+  const rosterChars = story.characters.filter(c => selection.rosterCharIds.has(c.id));
+  const detailedLines = detailedChars
+    .map(c => `【${c.name}】${c.personality}。${c.background}`)
+    .join('\n');
+  const rosterLines = rosterChars
+    .map(c => {
+      const blurb = c.description || c.personality?.slice(0, 30) || '';
+      return blurb ? `【${c.name}】${blurb}` : `【${c.name}】`;
+    })
+    .join('\n');
+  const detailedLocations = story.locations
+    .filter(l => selection.detailedLocationIds.has(l.id))
+    .map(l => ({ name: l.name, description: l.description }));
+  return { detailedLines, rosterLines, detailedLocations };
+}
 
 function buildWorldSystemPrompt(
   story: ParsedStory,
   playerConfig: PlayerConfig,
   guardrail: GuardrailParams,
   balance: NarrativeBalance,
+  selection: LoreSelection,
 ): string {
-  const playerChar = playerConfig.entryMode === 'soul-transfer'
-    ? story.characters.find(c => c.id === playerConfig.characterId)
-    : playerConfig.customCharacter;
-  const entryEvent = story.keyEvents[playerConfig.entryEventIndex];
-  const charDescriptions = story.characters
-    .filter(c => c.id !== playerConfig.characterId)
-    .map(c => `【${c.name}】${c.personality}。${c.background}`)
-    .join('\n');
-  const strictnessGuide = guardrail.strictness > 0.7
-    ? '严格遵循原作设定，角色性格不易被改变，世界规则绝对不可违反。'
-    : guardrail.strictness > 0.4
-      ? '基本遵循原作设定，但允许合理的性格发展和意外反应。'
-      : '角色有较大的行为弹性，可以做出更意外的反应，但核心设定仍需保持。';
-  const narrativeGuide = balance.narrativeWeight > 60
-    ? '以叙事为主，大段描写环境、心理和行为，对话穿插其中。'
-    : balance.narrativeWeight > 30
-      ? '叙事与对话交替，既有环境描写也有频繁的角色互动。'
-      : '以对话为主，频繁与角色交流互动，简短的环境和动作描述穿插其中。';
-
-  return `你是一个沉浸式互动叙事引擎。你正在运行一个基于以下故事世界的互动叙事体验。
-
-## 故事世界
-标题：${story.title}
-${story.summary}
-
-## 世界观设定
-时代：${story.worldSetting.era}
-类型：${story.worldSetting.genre}
-叙事风格：${story.worldSetting.toneDescription}
-世界规则：
-${story.worldSetting.rules.map(r => `- ${r}`).join('\n')}
-
-## 角色列表
-${charDescriptions}
-
-## 玩家角色
-模式：${playerConfig.entryMode === 'soul-transfer' ? '魂穿' : '转生'}
-角色：${playerChar?.name || '未知'}
-身份：${playerChar?.description || ''}
-性格：${playerChar?.personality || ''}
-背景：${playerChar?.background || ''}
-
-## 当前剧情节点
-${entryEvent ? `从"${entryEvent.title}"开始：${entryEvent.description}` : '从故事开头开始'}
-
-## 世界观护栏
-${strictnessGuide}
-- 如果玩家的行为完全超出世界观，通过合理的剧情方式化解
-- 核心角色的基本设定不可被轻易改写
-- 玩家的行为会有成功或失败的合理结果
-
-## 叙事风格
-${narrativeGuide}
-
-## 剧情推进要求（必须遵守）
-每次回复都要让故事实质前进，不能原地踏步。具体要求：
-- 至少发生一件**具体的事**：角色采取行动、揭示新信息、环境/时间变化、人物关系变化、新角色登场或离场
-- **禁止**只用不同措辞重复已有场景（例："他仍站在原地"、"店主又打量了他一眼"、"空气依然凝重"）
-- **禁止**连续两次以纯观察/沉思/环境描写作为主要内容
-- 当玩家的输入较被动（如"观察"、"等待"、"继续"、"思考一下"），**由你主动引入新事件或角色动作**推动剧情前进
-- 当玩家的输入具体明确，立刻演出其后果与相关角色的直接反应
-- 单次回复聚焦 1-2 个小事件，控制在 150-400 字；叙事描写占比 ≤ 50%，其余是对话、动作、事件发生
-- 回复结尾要把场景推到一个新的节点（新地点/新人到场/新冲突升级/新信息揭示），不要停在"一切未定"的模糊状态
-
-## 选项设计（choices）
-- 必须是**具体行动**（做什么、说什么、去哪里），不是"感受什么"或"继续观察"
-  - ✓ "上前询问店主关于昨夜的动静"
-  - ✓ "拔剑逼问王公公"
-  - ✗ "继续观察店主"
-  - ✗ "思考下一步"
-- 至少一个选项要能推动主线（揭示关键信息 / 引入冲突 / 遇见关键角色 / 进入关键地点）
-- 避免"等等看"、"再观察"、"暂不行动"这类使剧情停滞的选项
-
-## 交互格式要求
-你的每次回复必须严格按照以下JSON格式返回，不要包含任何其他文字：
-
-{
-  "narration": "叙事内容",
-  "dialogues": [{ "speaker": "角色名", "content": "对话内容" }],
-  "choices": [
-    { "text": "选项描述", "isBranchPoint": false }
-  ],
-  "interactions": [
-    { "characterName": "角色名", "event": "互动事件", "reaction": "角色反应", "sentiment": "positive/neutral/negative" }
-  ]
-}
-
-注意：choices 提供 2-3 个选项（都要是具体行动）；interactions 记录本轮有反应的角色。`;
-}
-
-function buildHistoryContext(history: NarrativeEntry[], maxEntries = 20): string {
-  return history.slice(-maxEntries).map(entry => {
-    switch (entry.type) {
-      case 'narration': return `[叙事] ${entry.content}`;
-      case 'dialogue': return `[${entry.speaker}] ${entry.content}`;
-      case 'player-action': return `[玩家行动] ${entry.content}`;
-      default: return entry.content;
-    }
-  }).join('\n\n');
+  return buildWorldSystemPromptTpl(
+    story, playerConfig, guardrail, balance, renderSelection(story, selection),
+  );
 }
 
 /**
@@ -209,18 +322,6 @@ function decodePartialJSONString(buffer: string, start: number): { value: string
     }
   }
   return { value: out, endIdx: i };
-}
-
-/**
- * Extract the narration field value from a (possibly incomplete) JSON buffer
- * for streaming display. Thinking-model preambles (`<think>…</think>`) are
- * stripped first so that the inner reasoning text never leaks into the UI.
- */
-export function extractStreamingNarration(buffer: string): string {
-  const cleaned = stripThinking(buffer);
-  const keyMatch = cleaned.match(/"narration"\s*:\s*"/);
-  if (!keyMatch || keyMatch.index === undefined) return '';
-  return decodePartialJSONString(cleaned, keyMatch.index + keyMatch[0].length).value;
 }
 
 export type StreamingDialogue = { speaker: string; content: string; partial?: boolean };
@@ -322,6 +423,137 @@ export function extractStreamingState(buffer: string): StreamingState {
   return { narration, dialogues };
 }
 
+/**
+ * Try to repair the most common LLM JSON mistakes before `JSON.parse`.
+ *
+ * Observed cases (real bug reports):
+ *   1. Missing closing quote on a key: `"text: "value"` → should be `"text": "value"`.
+ *      Pattern: `[{,] "<ascii-key-ident>: "` — the `:` is right next to the
+ *      key chars without a closing `"`. We restrict the key to ASCII
+ *      identifiers so this never matches anything inside a Chinese string.
+ *   2. Trailing commas before `]` or `}` (some models emit JS-style).
+ *
+ * Anything fancier (re-balancing braces, stripping mid-string newlines)
+ * is too risky and is left to the streaming-state fallback below.
+ */
+function sanitizeLikelyJSON(jsonStr: string): string {
+  return jsonStr
+    .replace(/([{,]\s*)"([a-zA-Z_$][\w$]*?):\s+/g, '$1"$2": ')
+    .replace(/,(\s*[\]}])/g, '$1');
+}
+
+/**
+ * Last-resort recovery when `JSON.parse` (and its sanitized retry) both
+ * fail. We use the streaming-state extractor — which works on a partial
+ * buffer by walking the JSON character by character — to pull out
+ * narration + dialogues + choices + interactions individually. Bad
+ * objects inside arrays are skipped; good ones survive. This means the
+ * one buggy choice in a 3-choice payload doesn't kill the whole turn.
+ */
+function recoverFromMalformedJSON(buffer: string): {
+  narration: string;
+  dialogues: { speaker: string; content: string }[];
+  choices: { text: string; isBranchPoint: boolean }[];
+  interactions: { characterName: string; event: string; reaction: string; sentiment: string }[];
+} {
+  const state = extractStreamingState(buffer);
+  // extractStreamingState already drops a partial trailing dialogue when
+  // it can't be parsed; we just need the completed ones for the final
+  // result. Filter out objects flagged `partial`.
+  const dialogues = state.dialogues
+    .filter(d => !d.partial && (d.speaker || d.content))
+    .map(d => ({ speaker: d.speaker, content: d.content }));
+
+  const choices = recoverArrayOfObjects<{ text: string; isBranchPoint: boolean }>(
+    buffer, 'choices',
+    (obj) => obj && typeof obj === 'object'
+      ? { text: String((obj as Record<string, unknown>).text || ''), isBranchPoint: Boolean((obj as Record<string, unknown>).isBranchPoint) }
+      : null,
+  ).filter(c => c.text);
+
+  const interactions = recoverArrayOfObjects<{ characterName: string; event: string; reaction: string; sentiment: string }>(
+    buffer, 'interactions',
+    (obj) => {
+      if (!obj || typeof obj !== 'object') return null;
+      const o = obj as Record<string, unknown>;
+      return {
+        characterName: String(o.characterName || ''),
+        event: String(o.event || ''),
+        reaction: String(o.reaction || ''),
+        sentiment: String(o.sentiment || 'neutral'),
+      };
+    },
+  ).filter(i => i.characterName);
+
+  return { narration: state.narration, dialogues, choices, interactions };
+}
+
+/**
+ * Walk a top-level array key in a JSON buffer, lifting each balanced
+ * `{...}` it contains and feeding it through `mapper`. Bad objects are
+ * silently dropped. Used by `recoverFromMalformedJSON` to salvage
+ * choices / interactions when the doc as a whole won't parse.
+ */
+function recoverArrayOfObjects<T>(
+  buffer: string,
+  key: string,
+  mapper: (obj: unknown) => T | null,
+): T[] {
+  const cleaned = stripThinking(buffer);
+  const out: T[] = [];
+  const m = cleaned.match(new RegExp(`"${key}"\\s*:\\s*\\[`));
+  if (!m || m.index === undefined) return out;
+  let i = m.index + m[0].length;
+  while (i < cleaned.length) {
+    while (i < cleaned.length && /[\s,]/.test(cleaned[i])) i++;
+    if (i >= cleaned.length || cleaned[i] === ']') break;
+    if (cleaned[i] !== '{') break;
+    const complete = tryParseBalancedObject(cleaned, i);
+    if (complete) {
+      const mapped = mapper(complete.value);
+      if (mapped) out.push(mapped);
+      i = complete.endIdx;
+    } else {
+      // Skip the malformed object: walk to the matching `}` if we can,
+      // otherwise bail.
+      const skipTo = findClosingBrace(cleaned, i);
+      if (skipTo < 0) break;
+      i = skipTo + 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * Walk forward from an opening `{` looking for its matching `}`,
+ * counting brace depth and respecting JSON string literals + escapes.
+ * Returns the index of the matching `}` or -1 when the buffer runs out.
+ *
+ * Used for skipping malformed objects in a recover pass: even when
+ * `JSON.parse` rejects the slice, we usually still want to find its
+ * end so the next sibling can be salvaged.
+ */
+function findClosingBrace(buffer: string, start: number): number {
+  if (buffer[start] !== '{') return -1;
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < buffer.length; i++) {
+    const c = buffer[i];
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') { inStr = true; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
 /** Parse raw LLM JSON response into structured entries */
 export function parseNarrationResponse(raw: string, story: ParsedStory, playerInput: string) {
   // Reasoning-model safety: strip thinking wrappers first.
@@ -338,17 +570,30 @@ export function parseNarrationResponse(raw: string, story: ParsedStory, playerIn
     if (balanced) jsonStr = balanced;
   }
 
-  let parsed: { narration?: string; dialogues?: { speaker: string; content: string }[]; choices?: { text: string; isBranchPoint: boolean }[]; interactions?: { characterName: string; event: string; reaction: string; sentiment: string }[] };
+  type Parsed = {
+    narration?: string;
+    dialogues?: { speaker: string; content: string }[];
+    choices?: { text: string; isBranchPoint: boolean }[];
+    interactions?: { characterName: string; event: string; reaction: string; sentiment: string }[];
+  };
+
+  // Three-tier parse: strict → sanitized → field-by-field salvage.
+  let parsed: Parsed | null = null;
   try {
-    parsed = JSON.parse(jsonStr);
+    parsed = JSON.parse(jsonStr) as Parsed;
   } catch {
-    // Fallback: drop the raw buffer (thinking-stripped) as narration so at
-    // least something shows, but don't leak JSON scaffolding to the reader.
-    return {
-      entries: [{ id: uuid(), type: 'narration' as const, content: cleaned || raw, timestamp: Date.now(),
-        choices: [{ id: uuid(), text: '继续观察', isBranchPoint: false }, { id: uuid(), text: '与附近的人交谈', isBranchPoint: false }] }],
-      interactions: [],
-    };
+    try {
+      parsed = JSON.parse(sanitizeLikelyJSON(jsonStr)) as Parsed;
+    } catch {
+      const recovered = recoverFromMalformedJSON(cleaned);
+      // Surface the failure in dev tools so the model behaviour can be
+      // tracked over time, but don't show JSON scaffolding to the user.
+      console.warn('[narrator] JSON parse failed twice; salvaged via partial extraction.', {
+        rawLen: raw.length, narrationLen: recovered.narration.length,
+        dialogues: recovered.dialogues.length, choices: recovered.choices.length,
+      });
+      parsed = recovered;
+    }
   }
 
   const entries: NarrativeEntry[] = [];
@@ -358,6 +603,20 @@ export function parseNarrationResponse(raw: string, story: ParsedStory, playerIn
   }
   const choices: StoryChoice[] = (parsed.choices || []).map(c => ({ id: uuid(), text: c.text, isBranchPoint: c.isBranchPoint }));
   if (entries.length > 0 && choices.length > 0) entries[entries.length - 1].choices = choices;
+
+  // If salvage produced nothing usable AT ALL, give the player a minimal
+  // recovery option so the story isn't soft-locked.
+  if (entries.length === 0) {
+    entries.push({
+      id: uuid(), type: 'narration',
+      content: '（本轮叙事生成异常，请尝试新的输入或选择）',
+      timestamp: Date.now(),
+      choices: [
+        { id: uuid(), text: '继续观察', isBranchPoint: false },
+        { id: uuid(), text: '与附近的人交谈', isBranchPoint: false },
+      ],
+    });
+  }
 
   const interactions = (parsed.interactions || []).map(inter => {
     const char = story.characters.find(c => c.name === inter.characterName);
@@ -382,42 +641,7 @@ export async function systemHintBrowser(
   history: NarrativeEntry[],
   question: string,
 ): Promise<string> {
-  const playerChar = playerConfig.entryMode === 'soul-transfer'
-    ? story.characters.find(c => c.id === playerConfig.characterId)
-    : playerConfig.customCharacter;
-
-  const recentContext = history.slice(-6).map(entry => {
-    switch (entry.type) {
-      case 'narration': return `[叙事] ${entry.content}`;
-      case 'dialogue': return `[${entry.speaker}] ${entry.content}`;
-      case 'player-action': return `[玩家] ${entry.content}`;
-      default: return entry.content;
-    }
-  }).join('\n\n');
-
-  const systemPrompt = `你是互动叙事引擎的"系统顾问"，为玩家提供简短的游戏提示。
-
-## 规则
-- 你的回答对剧情透明，不计入对话历史。
-- 回答必须简短（不超过 120 字），直接实用，像一个"小声耳语"。
-- **严禁剧透**：不暴露未来的事件走向、角色秘密、未揭示的真相。
-- 可以做的事：
-  - 提醒玩家当前的场景元素（有哪些人可以交互、有哪些可见的选项）
-  - 解释世界观规则的含义
-  - 给出与剧情目标相关的建议方向（但不指定具体动作）
-  - 澄清玩家之前对话中可能没理解的细节
-- 不要用 JSON 或任何结构化格式，直接用自然语言回答。
-
-## 故事背景
-${story.title} · ${story.worldSetting.era} · ${story.worldSetting.genre}
-
-## 玩家
-${playerChar?.name || '旅人'}（${playerConfig.entryMode === 'soul-transfer' ? '魂穿' : '转生'}）
-
-## 最近的剧情
-${recentContext || '（故事刚开始）'}
-`;
-
+  const systemPrompt = buildSystemHintPrompt(story, playerConfig, history);
   const answer = await callLLMBrowser(config, systemPrompt, question, {
     temperature: 0.5,
     maxTokens: 400,
@@ -445,15 +669,30 @@ export async function streamNarrationBrowser(
   onStreamProgress: (state: StreamingState) => void,
   mentionedCharacterNames?: string[],
   fromChoice?: boolean,
+  injectionConfig: InjectionConfig = DEFAULT_INJECTION_CONFIG,
 ): Promise<string> {
-  const systemPrompt = buildWorldSystemPrompt(story, playerConfig, guardrail, balance);
+  const playerChar = playerConfig.entryMode === 'soul-transfer'
+    ? story.characters.find(c => c.id === playerConfig.characterId)
+    : playerConfig.customCharacter;
+  const selection = selectActiveLore(
+    story, playerChar, history, playerInput, mentionedCharacterNames, injectionConfig,
+  );
+  const systemPrompt = buildWorldSystemPrompt(story, playerConfig, guardrail, balance, selection);
+  if (typeof console !== 'undefined' && console.debug) {
+    console.debug('[lore]', {
+      mode: selection.trace.mode,
+      promptChars: systemPrompt.length,
+      detailed: selection.trace.detailed,
+      rosterCount: selection.trace.roster.length,
+      locations: selection.trace.locations,
+      reasons: selection.trace.reasons,
+    });
+  }
   const historyContext = buildHistoryContext(history);
   const mentionHint = mentionedCharacterNames && mentionedCharacterNames.length > 0
-    ? `\n\n## 玩家明确指向的对象\n玩家在本次行动中主动面向并互动的角色：${mentionedCharacterNames.join('、')}。请让这些角色在回应中发挥主要作用（如对话、反应）。`
+    ? MENTION_HINT_TEMPLATE(mentionedCharacterNames)
     : '';
-  const choiceHint = fromChoice
-    ? `\n\n## 注意\n玩家是从预设选项中选取了一个行动。请以此为起点让剧情**实质推进**（一件具体的事发生），不要用氛围描写填充替代真正的进展。`
-    : '';
+  const choiceHint = fromChoice ? CHOICE_HINT : '';
   const userMessage = historyContext
     ? `## 之前的剧情\n${historyContext}\n\n## 玩家当前行动\n${playerInput}${mentionHint}${choiceHint}`
     : `故事开始。玩家已进入故事世界。\n\n玩家的第一个行动：${playerInput || '（观察周围环境）'}${mentionHint}${choiceHint}`;
@@ -536,11 +775,23 @@ export type EpilogueStreamEntry = {
   partial?: boolean;
 };
 export type EpilogueStreamState = {
+  /** Which phase the generator is currently running. UI uses this to swap
+   *  between "正在做旅程总结" and "角色回忆" surfaces. */
+  phase: 'arc' | 'memoirs' | 'done';
+  /** Story-arc summary, populated once the arc LLM call completes.
+   *  `undefined` while the arc is still generating. */
+  arcReport?: StoryArcReport;
   /** Fully formed memoirs emitted by the model so far. */
   entries: EpilogueStreamEntry[];
   /** Total expected (helps the UI draw a determinate progress bar). */
   expectedCount: number;
 };
+
+/** Final result returned by `generateEpilogueBrowser`. */
+export interface EpilogueResult {
+  storyArc?: StoryArcReport;
+  memoirs: EpilogueEntry[];
+}
 
 /**
  * Extract memoirs from a streaming JSON array buffer. Reuses the same
@@ -548,14 +799,16 @@ export type EpilogueStreamState = {
  * (if any) surfaces as an entry with `partial: true` so the UI can render
  * its characterName while the memoir text is still being written.
  */
-function extractStreamingEpilogue(buffer: string, expectedCount: number): EpilogueStreamState {
+function extractStreamingEpilogue(
+  buffer: string, expectedCount: number, arcReport?: StoryArcReport,
+): EpilogueStreamState {
   // Strip reasoning-model thinking first so a mid-stream <think> block
   // doesn't crash through as if it were the memoir body.
   const cleaned = stripThinking(buffer);
   const entries: EpilogueStreamEntry[] = [];
 
   const arrStart = cleaned.indexOf('[');
-  if (arrStart < 0) return { entries, expectedCount };
+  if (arrStart < 0) return { phase: 'memoirs', arcReport, entries, expectedCount };
 
   let i = arrStart + 1;
   while (i < cleaned.length) {
@@ -588,7 +841,7 @@ function extractStreamingEpilogue(buffer: string, expectedCount: number): Epilog
       break;
     }
   }
-  return { entries, expectedCount };
+  return { phase: 'memoirs', arcReport, entries, expectedCount };
 }
 
 /**
@@ -600,21 +853,192 @@ function extractStreamingEpilogue(buffer: string, expectedCount: number): Epilog
  * Streams each memoir as it completes via `onProgress`, enabling a
  * determinate progress bar and incremental card reveal.
  */
-export async function generateEpilogueBrowser(
+/**
+ * Threshold gates for "main character" selection used by the epilogue.
+ * "≥5 turns of intersection AND ≥1 non-neutral sentiment" matches the
+ * blueprint's spec; we fall back to the old "any participation" rule
+ * when the strict gate would yield zero memoirs (short playthroughs).
+ */
+const MAIN_CHARACTER_INTERSECTION_MIN = 5;
+const MAIN_CHARACTER_SENTIMENT_MIN = 1;
+
+/**
+ * Pure derivation of the four blueprint-mandated stats: locations
+ * visited, dialogue characters, group-scene count, relationship shifts.
+ * Plus a `totalTurns` for the chip layout. No LLM involved.
+ */
+export function computeStoryArcStats(
+  story: ParsedStory,
+  history: NarrativeEntry[],
+  characterInteractions: CharacterInteraction[],
+  playerName: string,
+): StoryArcStats {
+  const totalTurns = history.filter(e => e.type === 'player-action').length;
+
+  // Locations: scan narration + dialogue text for known location names.
+  const locationsSeen = new Set<string>();
+  for (const e of history) {
+    if (!e.content) continue;
+    for (const loc of story.locations) {
+      if (loc.name && e.content.includes(loc.name)) locationsSeen.add(loc.id);
+    }
+  }
+
+  // Dialogue characters: distinct non-player speakers.
+  const speakers = new Set<string>();
+  for (const e of history) {
+    if (e.type === 'dialogue' && e.speaker && e.speaker !== playerName) {
+      speakers.add(e.speaker);
+    }
+  }
+
+  // Group scenes: a "scene" runs from one player-action to the next.
+  // Count those segments where ≥3 distinct named characters appear
+  // (either as dialogue speakers or mentioned by name in narration).
+  let groupSceneCount = 0;
+  let scenePeople = new Set<string>();
+  const flushScene = () => {
+    if (scenePeople.size >= 3) groupSceneCount++;
+    scenePeople = new Set<string>();
+  };
+  for (const e of history) {
+    if (e.type === 'player-action') {
+      flushScene();
+    } else if (e.type === 'dialogue' && e.speaker) {
+      if (e.speaker !== playerName) scenePeople.add(e.speaker);
+    } else if (e.type === 'narration' && e.content) {
+      for (const c of story.characters) {
+        if (c.name && e.content.includes(c.name)) scenePeople.add(c.name);
+      }
+    }
+  }
+  flushScene();
+
+  // Relationship shifts: every non-neutral interaction entry.
+  let relationshipShifts = 0;
+  for (const ci of characterInteractions) {
+    for (const i of ci.interactions) {
+      if (i.sentiment && i.sentiment !== 'neutral') relationshipShifts++;
+    }
+  }
+
+  return {
+    totalTurns,
+    locationsVisited: locationsSeen.size,
+    dialogueCharacters: speakers.size,
+    groupSceneCount,
+    relationshipShifts,
+  };
+}
+
+/**
+ * Generate the four-phase 起承转合 recap. One LLM call, non-streaming
+ * (the response is short enough — 200-400 字 — that streaming buys
+ * little UX; the page shows a "正在做旅程总结" placeholder during the
+ * call).
+ */
+export async function generateStoryArc(
   config: LLMConfig,
   story: ParsedStory,
   playerConfig: PlayerConfig,
-  characterInteractions: { characterId: string; characterName: string; interactions: { event: string; playerAction: string; characterReaction: string; sentiment: string }[] }[],
+  characterInteractions: CharacterInteraction[],
   narrativeHistory: NarrativeEntry[],
-  onProgress?: (state: EpilogueStreamState) => void,
-): Promise<{ characterId: string; characterName: string; memoir: string }[]> {
+): Promise<StoryArcReport> {
   const playerChar = playerConfig.entryMode === 'soul-transfer'
     ? story.characters.find(c => c.id === playerConfig.characterId)
     : playerConfig.customCharacter;
   const playerName = playerChar?.name || '旅人';
 
-  // Collect characters who actually participated: either they had tracked
-  // interactions, or they spoke dialogue, or they were explicitly addressed.
+  const stats = computeStoryArcStats(story, narrativeHistory, characterInteractions, playerName);
+  const transcript = buildPlaythroughTranscript(narrativeHistory, playerName);
+  const shifted = characterInteractions
+    .filter(ci => ci.interactions.some(i => i.sentiment && i.sentiment !== 'neutral'))
+    .map(ci => ci.characterName);
+
+  const userMessage = buildStoryArcUserMessage({
+    playerName,
+    storyTitle: story.title,
+    storyGenre: story.worldSetting.genre,
+    storyEra: story.worldSetting.era,
+    transcript,
+    stats,
+    shiftedRelationships: shifted,
+  });
+
+  const raw = await callLLMBrowser(
+    config, STORY_ARC_SYSTEM_PROMPT, userMessage,
+    { temperature: 0.5, maxTokens: 1500 },
+  );
+  const cleaned = stripThinking(raw);
+  let jsonStr = cleaned.trim();
+  const fenced = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (fenced) jsonStr = fenced[1].trim();
+  else {
+    const balanced = extractFirstBalancedJSON(cleaned);
+    if (balanced) jsonStr = balanced;
+  }
+  let parsed: { qi?: string; cheng?: string; zhuan?: string; he?: string } = {};
+  try {
+    parsed = JSON.parse(jsonStr);
+  } catch (err) {
+    console.warn('[story-arc] JSON parse failed; emitting empty arc', err);
+  }
+  return {
+    qi: parsed.qi || '',
+    cheng: parsed.cheng || '',
+    zhuan: parsed.zhuan || '',
+    he: parsed.he || '',
+    stats,
+  };
+}
+
+/**
+ * End-of-run epilogue: produces a story-arc recap **and** per-character
+ * memoirs in one call. Two LLM calls run sequentially:
+ *
+ *   1. Story arc (起承转合, ~200-400 字) — short, non-streaming.
+ *      `onProgress({ phase: 'arc', ... })` fires once at the start so
+ *      the UI can show a placeholder; the full state is published when
+ *      it completes.
+ *   2. Per-character memoirs — streaming as before, gated by the new
+ *      "main character" rule (≥5 turns of intersection, ≥1 non-neutral
+ *      sentiment) with a fallback to "any participation" for short
+ *      playthroughs that would otherwise produce zero memoirs.
+ */
+export async function generateEpilogueBrowser(
+  config: LLMConfig,
+  story: ParsedStory,
+  playerConfig: PlayerConfig,
+  characterInteractions: CharacterInteraction[],
+  narrativeHistory: NarrativeEntry[],
+  onProgress?: (state: EpilogueStreamState) => void,
+): Promise<EpilogueResult> {
+  const playerChar = playerConfig.entryMode === 'soul-transfer'
+    ? story.characters.find(c => c.id === playerConfig.characterId)
+    : playerConfig.customCharacter;
+  const playerName = playerChar?.name || '旅人';
+
+  // Pre-stats so the UI gets the chips even if the LLM fails halfway.
+  const initialStats = computeStoryArcStats(
+    story, narrativeHistory, characterInteractions, playerName,
+  );
+
+  // ---- Phase 1: story arc ------------------------------------------------
+  if (onProgress) onProgress({ phase: 'arc', entries: [], expectedCount: 0 });
+  let storyArc: StoryArcReport | undefined;
+  try {
+    storyArc = await generateStoryArc(
+      config, story, playerConfig, characterInteractions, narrativeHistory,
+    );
+  } catch (err) {
+    console.warn('[epilogue] story arc generation failed; continuing with stats only', err);
+    storyArc = {
+      qi: '', cheng: '', zhuan: '', he: '',
+      stats: initialStats,
+    };
+  }
+
+  // ---- Phase 2: pick main characters ------------------------------------
   const speakers = new Set<string>();
   for (const e of narrativeHistory) {
     if (e.type === 'dialogue' && e.speaker && e.speaker !== playerName) {
@@ -623,20 +1047,39 @@ export async function generateEpilogueBrowser(
   }
   const interactionMap = new Map(characterInteractions.map(ci => [ci.characterName, ci]));
 
+  // Strict main-character rule: ≥5 turns of intersection + ≥1 non-neutral sentiment.
+  const intersectionTurns = (c: Character): number => {
+    const dialogueLines = narrativeHistory
+      .filter(e => e.type === 'dialogue' && e.speaker === c.name).length;
+    const interactionEntries = interactionMap.get(c.name)?.interactions.length || 0;
+    return dialogueLines + interactionEntries;
+  };
+  const sentimentEvents = (c: Character): number =>
+    interactionMap.get(c.name)?.interactions
+      .filter(i => i.sentiment && i.sentiment !== 'neutral').length || 0;
+
   let participants = story.characters.filter(c =>
-    c.id !== playerChar?.id && (interactionMap.has(c.name) || speakers.has(c.name))
+    c.id !== playerChar?.id
+    && intersectionTurns(c) >= MAIN_CHARACTER_INTERSECTION_MIN
+    && sentimentEvents(c) >= MAIN_CHARACTER_SENTIMENT_MIN,
   );
 
-  if (participants.length === 0) return [];
+  // Fallback for short playthroughs: keep the old loose rule so the
+  // epilogue is never empty.
+  if (participants.length === 0) {
+    participants = story.characters.filter(c =>
+      c.id !== playerChar?.id && (interactionMap.has(c.name) || speakers.has(c.name))
+    );
+  }
 
-  // Rank by richness of interaction when there are many, so the single LLM
-  // call has room to give each memoir proper depth.
+  if (participants.length === 0) {
+    if (onProgress) onProgress({ phase: 'done', arcReport: storyArc, entries: [], expectedCount: 0 });
+    return { storyArc, memoirs: [] };
+  }
+
+  // Rank when over budget so the single LLM call has room per memoir.
   if (participants.length > 10) {
-    participants.sort((a, b) => {
-      const aCount = (interactionMap.get(a.name)?.interactions.length || 0) + (speakers.has(a.name) ? 1 : 0);
-      const bCount = (interactionMap.get(b.name)?.interactions.length || 0) + (speakers.has(b.name) ? 1 : 0);
-      return bCount - aCount;
-    });
+    participants.sort((a, b) => intersectionTurns(b) - intersectionTurns(a));
     participants = participants.slice(0, 10);
   }
 
@@ -658,50 +1101,29 @@ ${interactionLog}`;
 
   const transcript = buildPlaythroughTranscript(narrativeHistory, playerName);
 
-  const systemPrompt = `你是互动叙事的"后日谈生成器"。玩家刚刚完成了一次**独一无二的游玩经历**，你需要让每个与玩家有过交集的角色，以第一人称写一段对玩家的回忆。
+  const systemPrompt = EPILOGUE_SYSTEM_PROMPT;
+  const userMessage = buildEpilogueUserMessage({
+    story,
+    playerConfig,
+    playerName,
+    characterSections,
+    transcript,
+    participantCount: participants.length,
+    participantNames: participants.map(p => p.name),
+  });
 
-## 核心原则（非常重要）
-1. **严禁复述原作剧情**。这次游玩里发生的所有事件，哪怕与原作同名，也应以**本次游玩中真实呈现的细节**为准。不要写"据说发生过"、"在那个故事里"这类模糊说法。
-2. **必须直接引用本次游玩中的具体片段**：具体的对话原话、玩家做过的具体动作、事件发生的具体场景。每个回忆里至少出现 **2-3 个**可以对应到下方叙事记录的具体细节。
-3. **用角色自己的声音写**：参考每个角色的性格（personality）和背景（background），让 diction、用词习惯、情感偏好符合这个角色。不同角色的回忆要有明显的语气差异。
-4. **情感轨迹必须体现**：如果某个角色与玩家的互动记录显示了明显的情感变化（比如从中立到好感、或从好感到嫌隙），这个转变必须在回忆里被写出来，并指出是哪个具体事件造成的。
-5. 第一人称叙述，每段 **200-400 字**。可以包含评价、遗憾、感激、困惑、怅惘等情感，不要只陈述事件。
-
-## 输出格式
-严格 JSON 数组，按下方"需要写回忆的角色"中的顺序：
-[
-  { "characterName": "角色名", "memoir": "第一人称回忆文字" }
-]
-只返回 JSON，不要任何其他文字。`;
-
-  const userMessage = `## 故事世界
-${story.title} · ${story.worldSetting.era} · ${story.worldSetting.genre}
-
-## 玩家
-名字：${playerName}
-进入方式：${playerConfig.entryMode === 'soul-transfer' ? '魂穿（扮演既有角色）' : '转生（全新原创角色）'}
-身份：${playerChar?.description || '（无）'}
-性格：${playerChar?.personality || '（无）'}
-
-## 需要写回忆的角色（共 ${participants.length} 位，请按此顺序输出）
-${characterSections}
-
-## 本次游玩的完整叙事记录
-${transcript}
-
-请基于上面这次独有的游玩记录，为每位角色写一段第一人称的回忆。`;
-
+  // ---- Phase 3: stream memoirs -------------------------------------------
   const expectedCount = participants.length;
   let full = '';
   let lastSig = '';
-  if (onProgress) onProgress({ entries: [], expectedCount });
+  if (onProgress) onProgress({ phase: 'memoirs', arcReport: storyArc, entries: [], expectedCount });
   for await (const token of streamLLMBrowser(config, systemPrompt, userMessage, {
     temperature: 0.7,
     maxTokens: 4096,
   })) {
     full += token;
     if (onProgress) {
-      const state = extractStreamingEpilogue(full, expectedCount);
+      const state = extractStreamingEpilogue(full, expectedCount, storyArc);
       const sig = state.entries.map(e => `${e.partial ? 'P' : 'F'}|${e.characterName}|${e.memoir.length}`).join('/');
       if (sig !== lastSig) {
         lastSig = sig;
@@ -718,19 +1140,132 @@ ${transcript}
     const balanced = extractFirstBalancedJSON(cleanedFull);
     if (balanced) jsonStr = balanced;
   }
-  const parsed: { characterName: string; memoir: string }[] = JSON.parse(jsonStr);
-  return parsed.map(p => {
-    const char = story.characters.find(c => c.name === p.characterName);
-    return { characterId: char?.id || '', characterName: p.characterName, memoir: p.memoir };
+  let parsedMemoirs: { characterName: string; memoir: string }[] = [];
+  try {
+    parsedMemoirs = JSON.parse(jsonStr);
+  } catch (err) {
+    console.warn('[epilogue] memoir JSON parse failed; trying salvage', err);
+    // We don't have a streaming-state-style salvage for memoirs (yet).
+    // Fall back to whatever extractStreamingEpilogue already pulled.
+    const salvage = extractStreamingEpilogue(cleanedFull, expectedCount, storyArc);
+    parsedMemoirs = salvage.entries
+      .filter(e => !e.partial)
+      .map(e => ({ characterName: e.characterName, memoir: e.memoir }));
+  }
+  const memoirs = reconcileEpilogueWithParticipants(parsedMemoirs, participants);
+
+  if (onProgress) onProgress({ phase: 'done', arcReport: storyArc, entries: [], expectedCount });
+  return { storyArc, memoirs };
+}
+
+/**
+ * Map LLM-returned `[{characterName, memoir}]` back to the participants we
+ * actually asked about. Defends against three realistic LLM mistakes:
+ *
+ * 1. The model emits an alias instead of the canonical name (e.g. "老白"
+ *    when participants list has "沃尔特·怀特"). We do bidirectional
+ *    `includes` matching to catch this.
+ * 2. The model reorders the array. We honour its ordering only if names
+ *    matched cleanly; when a name is unmatched we **fall back to positional
+ *    alignment** so a still-readable memoir doesn't get dropped.
+ * 3. The model skips a participant or duplicates one. Skipped participants
+ *    surface with an empty memoir (so the UI can show "（未留下回忆）"
+ *    instead of silently disappearing).
+ */
+function reconcileEpilogueWithParticipants(
+  parsed: { characterName: string; memoir: string }[],
+  participants: { id: string; name: string }[],
+): { characterId: string; characterName: string; memoir: string }[] {
+  const participantsByCanonName = new Map(participants.map(p => [p.name, p]));
+  const usedParticipantIds = new Set<string>();
+
+  // First pass: assign each parsed entry to a participant by best-match.
+  type Slot = {
+    participantId: string | null;
+    characterName: string;
+    memoir: string;
+    matchedBy: 'exact' | 'fuzzy' | 'positional' | 'none';
+    parsedIndex: number;
+  };
+  const slots: Slot[] = parsed.map((p, idx) => {
+    const name = (p.characterName || '').trim();
+    const memoir = p.memoir || '';
+
+    // Tier 1: exact match.
+    const exact = participantsByCanonName.get(name);
+    if (exact && !usedParticipantIds.has(exact.id)) {
+      usedParticipantIds.add(exact.id);
+      return { participantId: exact.id, characterName: exact.name, memoir, matchedBy: 'exact', parsedIndex: idx };
+    }
+
+    // Tier 2: bidirectional substring (handles aliases like 老白 ↔ 沃尔特·怀特).
+    if (name) {
+      const fuzzy = participants.find(p2 =>
+        !usedParticipantIds.has(p2.id) &&
+        (p2.name.includes(name) || name.includes(p2.name))
+      );
+      if (fuzzy) {
+        usedParticipantIds.add(fuzzy.id);
+        return { participantId: fuzzy.id, characterName: fuzzy.name, memoir, matchedBy: 'fuzzy', parsedIndex: idx };
+      }
+    }
+
+    // Tier 3: defer — assign positionally in the second pass.
+    return {
+      participantId: null,
+      characterName: name || '（无名）',
+      memoir,
+      matchedBy: 'none',
+      parsedIndex: idx,
+    };
   });
+
+  // Second pass: positional alignment for unmatched entries.
+  const unassignedParticipants = participants.filter(p => !usedParticipantIds.has(p.id));
+  let unassignedCursor = 0;
+  for (const slot of slots) {
+    if (slot.participantId) continue;
+    const fallback = unassignedParticipants[unassignedCursor++];
+    if (fallback) {
+      slot.participantId = fallback.id;
+      slot.characterName = fallback.name;
+      slot.matchedBy = 'positional';
+    }
+  }
+
+  // Telemetry for observability — surfaces silently in console only.
+  const stats = slots.reduce((acc, s) => {
+    acc[s.matchedBy] = (acc[s.matchedBy] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  if ((stats.fuzzy || 0) + (stats.positional || 0) + (stats.none || 0) > 0) {
+    console.warn('[epilogue] non-exact reconciliation', {
+      stats, parsedCount: parsed.length, participantCount: participants.length,
+    });
+  }
+
+  // Backfill missing participants the model skipped entirely.
+  const finalEntries = slots.map(s => ({
+    characterId: s.participantId || '',
+    characterName: s.characterName,
+    memoir: s.memoir,
+  }));
+  for (const p of participants) {
+    if (!finalEntries.some(e => e.characterId === p.id)) {
+      finalEntries.push({
+        characterId: p.id,
+        characterName: p.name,
+        memoir: '（这一位没有留下文字。也许沉默才是 ta 此刻的回答。）',
+      });
+    }
+  }
+  return finalEntries;
 }
 
 /** Generate reincarnation character (non-streaming) */
 export async function generateReincarnationBrowser(config: LLMConfig, story: ParsedStory) {
-  const systemPrompt = `根据以下世界观，生成一个符合背景的全新原创角色。返回严格JSON：
-{ "name": "角色名", "description": "外貌及身份简述", "personality": "性格特征", "background": "背景故事" }`;
-
-  const worldInfo = `世界：${story.title}\n时代：${story.worldSetting.era}\n类型：${story.worldSetting.genre}\n设定：${story.worldSetting.rules.join('；')}\n已有角色：${story.characters.map(c => c.name).join('、')}`;
+  const systemPrompt = REINCARNATION_SYSTEM_PROMPT;
+  const worldInfo = buildReincarnationUserMessage(story);
   const response = await callLLMBrowser(config, systemPrompt, worldInfo, { temperature: 0.8 });
   const cleaned = stripThinking(response);
   let jsonStr = cleaned.trim();

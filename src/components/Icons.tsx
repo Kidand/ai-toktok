@@ -21,10 +21,6 @@ export const Close = (p: IconProps) => (
   <svg {...base} {...p}><path d="M18 6 6 18M6 6l12 12" /></svg>
 );
 
-export const Menu = (p: IconProps) => (
-  <svg {...base} {...p}><path d="M4 6h16M4 12h16M4 18h16" /></svg>
-);
-
 export const Send = (p: IconProps) => (
   <svg {...base} {...p}>
     <path d="M22 2 11 13" />
@@ -67,13 +63,6 @@ export const Book = (p: IconProps) => (
   </svg>
 );
 
-export const Clock = (p: IconProps) => (
-  <svg {...base} {...p}>
-    <circle cx="12" cy="12" r="10" />
-    <path d="M12 6v6l4 2" />
-  </svg>
-);
-
 export const Trash = (p: IconProps) => (
   <svg {...base} {...p}>
     <path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
@@ -110,3 +99,13 @@ export const Spinner = (p: IconProps) => (
     <path d="M21 12a9 9 0 1 1-6.22-8.56" />
   </svg>
 );
+
+export const Globe = (p: IconProps) => (
+  <svg {...base} {...p}>
+    <circle cx="12" cy="12" r="10" />
+    <path d="M2 12h20" />
+    <path d="M12 2a15 15 0 0 1 0 20" />
+    <path d="M12 2a15 15 0 0 0 0 20" />
+  </svg>
+);
+

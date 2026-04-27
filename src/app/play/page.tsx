@@ -4,9 +4,12 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { streamNarrationBrowser, parseNarrationResponse, systemHintBrowser, type StreamingState } from '@/lib/narrator-browser';
+import { generateSceneReflection, type SceneReflection } from '@/lib/reflection_reporter';
+import { agentInterview } from '@/lib/reflection_reporter/deep-interaction';
+import { agentProfileFromCharacter } from '@/lib/agent_factory';
 import { NarrativeFeed, speakerColor } from '@/components/NarrativeFeed';
 import { MentionInput, MentionInputHandle, MentionCandidate, MentionParsed } from '@/components/MentionInput';
-import { ArrowLeft, Users, Send, Close, Sparkles } from '@/components/Icons';
+import { ArrowLeft, Users, Send, Close, Sparkles, Globe } from '@/components/Icons';
 
 const SYSTEM_MENTION_ID = 'system';
 const PRESENCE_WINDOW = 5;
@@ -15,17 +18,25 @@ export default function PlayPage() {
   const router = useRouter();
   const {
     parsedStory, playerConfig, llmConfig, isPlaying,
-    narrativeHistory, guardrailParams, narrativeBalance,
+    narrativeHistory, guardrailParams, narrativeBalance, injectionConfig,
     addNarrativeEntries, addPlayerAction, addCharacterInteractions,
     autoSave, setIsGenerating, isGenerating,
     characterInteractions,
+    init, _hydrated, currentSaveId,
   } = useGameStore();
+
+  // Hard refresh / direct navigation to /play needs to drive the IDB hydration
+  // itself; the home page may never have run.
+  useEffect(() => { init(); }, [init]);
 
   const [showSidebar, setShowSidebar] = useState(false);
   const [expandedCharId, setExpandedCharId] = useState<string | null>(null);
   const [streamingState, setStreamingState] = useState<StreamingState>({ narration: '', dialogues: [] });
   const [endConfirm, setEndConfirm] = useState(false);
   const [systemHint, setSystemHint] = useState<{ question: string; answer: string; loading: boolean } | null>(null);
+  const [reflection, setReflection] = useState<{ loading: boolean; data: SceneReflection | null; error?: string } | null>(null);
+  const [interview, setInterview] = useState<{ characterId: string; characterName: string; question: string; answer: string; loading: boolean } | null>(null);
+  const [interviewDraft, setInterviewDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<MentionInputHandle>(null);
 
@@ -96,6 +107,7 @@ export default function PlayPage() {
         (state) => setStreamingState(state),
         mentionedNames,
         fromChoice,
+        injectionConfig,
       );
       setStreamingState({ narration: '', dialogues: [] });
       const result = parseNarrationResponse(raw, parsedStory, input);
@@ -110,7 +122,7 @@ export default function PlayPage() {
       setIsGenerating(false);
       setStreamingState({ narration: '', dialogues: [] });
     }
-  }, [llmConfig, parsedStory, playerConfig, guardrailParams, narrativeBalance, narrativeHistory, addNarrativeEntries, addCharacterInteractions, autoSave, setIsGenerating]);
+  }, [llmConfig, parsedStory, playerConfig, guardrailParams, narrativeBalance, narrativeHistory, injectionConfig, addNarrativeEntries, addCharacterInteractions, autoSave, setIsGenerating]);
 
   const generateOpening = useCallback(async () => {
     if (!llmConfig || !parsedStory || !playerConfig || narrativeHistory.length > 0) return;
@@ -122,6 +134,12 @@ export default function PlayPage() {
       generateOpening();
     }
   }, [isPlaying, narrativeHistory.length, isGenerating, generateOpening]);
+
+  // While IndexedDB is rehydrating an in-progress game, show a loader rather
+  // than the "请先完成设置" fallback — the data is on the way.
+  if (!_hydrated && currentSaveId) {
+    return <div className="min-h-screen flex items-center justify-center text-[var(--ink-muted)]">加载游戏中...</div>;
+  }
 
   if (!parsedStory || !playerConfig || !isPlaying) {
     return (
@@ -176,6 +194,51 @@ export default function PlayPage() {
     streamNarrate('narrate', choiceText, undefined, true);
   };
 
+  const handleReflection = async () => {
+    if (!llmConfig || !parsedStory || !playerConfig) return;
+    setReflection({ loading: true, data: null });
+    try {
+      const data = await generateSceneReflection({
+        config: llmConfig,
+        story: parsedStory,
+        playerConfig,
+        history: narrativeHistory,
+      });
+      setReflection({ loading: false, data });
+    } catch (err) {
+      setReflection({ loading: false, data: null, error: err instanceof Error ? err.message : '生成失败' });
+    }
+  };
+
+  const handleInterview = async (characterId: string, question: string) => {
+    if (!llmConfig || !parsedStory || !playerConfig) return;
+    const character = parsedStory.characters.find(c => c.id === characterId);
+    if (!character) return;
+    const trimmed = question.trim();
+    if (!trimmed) return;
+    setInterview({ characterId, characterName: character.name, question: trimmed, answer: '', loading: true });
+    try {
+      const projectId = parsedStory.project?.id || parsedStory.id;
+      const profile = parsedStory.agents?.find(a => a.entityId === character.id)
+        || agentProfileFromCharacter(projectId, character, parsedStory);
+      const answer = await agentInterview({
+        config: llmConfig,
+        story: parsedStory,
+        playerConfig,
+        history: narrativeHistory,
+        agent: profile,
+        question: trimmed,
+      });
+      setInterview({ characterId, characterName: character.name, question: trimmed, answer, loading: false });
+    } catch (err) {
+      setInterview({
+        characterId, characterName: character.name, question: trimmed,
+        answer: err instanceof Error ? err.message : '访谈失败',
+        loading: false,
+      });
+    }
+  };
+
   const handleEndStory = () => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
     setEndConfirm(false);
@@ -207,6 +270,17 @@ export default function PlayPage() {
           </div>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
+          <button onClick={() => router.push('/world')} className="btn btn-ghost btn-sm" aria-label="世界总览">
+            <Globe />
+          </button>
+          <button
+            onClick={handleReflection}
+            disabled={isGenerating || !canEnd || reflection?.loading}
+            className="btn btn-outline btn-sm" aria-label="剧情回响"
+          >
+            <span className="hidden sm:inline">剧情回响</span>
+            <span className="sm:hidden">回响</span>
+          </button>
           <button onClick={() => setShowSidebar(true)} className="btn btn-outline btn-sm" aria-label="角色">
             <Users />
           </button>
@@ -360,6 +434,27 @@ export default function PlayPage() {
 
                     {isExpanded && (
                       <div className="anim-fade-in border-t-[2.5px] border-[var(--ink)] bg-[var(--paper-softsink)] p-3 space-y-3">
+                        {!isPlayer && (
+                          <div className="flex gap-2 flex-wrap">
+                            <button
+                              onClick={() => {
+                                setInterviewDraft('');
+                                setInterview({
+                                  characterId: char.id,
+                                  characterName: char.name,
+                                  question: '',
+                                  answer: '',
+                                  loading: false,
+                                });
+                                setShowSidebar(false);
+                              }}
+                              className="btn btn-outline btn-sm"
+                              disabled={isGenerating}
+                            >
+                              <Sparkles width={12} height={12} /> 深问 {char.name}
+                            </button>
+                          </div>
+                        )}
                         {char.description && (
                           <div>
                             <div className="label-mono text-[9.5px] mb-1">描述</div>
@@ -410,6 +505,151 @@ export default function PlayPage() {
         </>
       )}
 
+      {/* 剧情回响浮层 */}
+      {reflection && (
+        <div className="fixed inset-0 z-50 bg-[rgba(17,17,17,0.55)] flex items-center justify-center p-4 anim-fade-in"
+             onClick={() => setReflection(null)}>
+          <div className="surface-raised max-w-lg w-full p-5 max-h-[85vh] overflow-y-auto"
+               onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <span className="chapter-head"><span className="ordinal">∞</span> · 剧情回响</span>
+              <button onClick={() => setReflection(null)} className="btn btn-ghost btn-sm" aria-label="关闭">
+                <Close />
+              </button>
+            </div>
+            {reflection.loading && (
+              <p className="font-mono text-sm text-[var(--ink-muted)]">▸ 正在回顾本段剧情…</p>
+            )}
+            {reflection.error && (
+              <p className="font-mono text-sm text-[var(--hi-coral)]">✕ {reflection.error}</p>
+            )}
+            {reflection.data && (
+              <div className="space-y-4">
+                <ReflectionBlock label="本段摘要" body={reflection.data.summary} />
+                <ReflectionBlock label="玩家影响" body={reflection.data.userImpact} />
+                <ReflectionBlock label="情绪基调" body={reflection.data.emotionalEcho} />
+                {reflection.data.relationshipChanges.length > 0 && (
+                  <div>
+                    <div className="label-mono text-[10px] mb-1.5">关系变化</div>
+                    <ul className="space-y-1.5 font-serif text-sm">
+                      {reflection.data.relationshipChanges.map((rc, i) => (
+                        <li key={i} className="pl-2 border-l-2 border-[var(--ink)]">
+                          <span className="font-bold">{rc.characterName}</span>
+                          {rc.from && rc.to && <span className="text-[var(--ink-muted)]"> · {rc.from} → {rc.to}</span>}
+                          {rc.reason && <p className="text-[12px] text-[var(--ink-muted)] mt-0.5">{rc.reason}</p>}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {reflection.data.branchHints.length > 0 && (
+                  <div>
+                    <div className="label-mono text-[10px] mb-1.5">线索方向</div>
+                    <ul className="space-y-1 font-serif text-sm list-disc list-inside">
+                      {reflection.data.branchHints.map((h, i) => <li key={i}>{h}</li>)}
+                    </ul>
+                  </div>
+                )}
+                {reflection.data.nextSceneSuggestions.length > 0 && (
+                  <div>
+                    <div className="label-mono text-[10px] mb-1.5">下一幕建议</div>
+                    <ul className="space-y-2">
+                      {reflection.data.nextSceneSuggestions.map((s, i) => (
+                        <li key={i} className="surface p-2.5">
+                          <div className="font-sans font-bold text-sm">{s.title}</div>
+                          <p className="font-serif text-xs text-[var(--ink-soft)] mt-0.5">{s.hook}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 角色访谈浮层 — 内嵌输入 + 多轮 + 清除答案重问 */}
+      {interview && (
+        <div className="fixed inset-0 z-50 bg-[rgba(17,17,17,0.55)] flex items-end sm:items-center justify-center p-0 sm:p-4 anim-fade-in"
+             onClick={() => setInterview(null)}>
+          <div className="surface-raised w-full sm:max-w-lg p-5 sm:rounded-none flex flex-col"
+               style={{ maxHeight: '85vh' }}
+               onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3 shrink-0">
+              <span className="chapter-head"><span className="ordinal">?</span> · 深问 {interview.characterName}</span>
+              <button onClick={() => setInterview(null)} className="btn btn-ghost btn-sm" aria-label="关闭">
+                <Close />
+              </button>
+            </div>
+            <p className="text-[10px] text-[var(--ink-muted)] font-mono mb-3 shrink-0">
+              {'// 访谈不计入剧情、不影响关系；按 Enter 提交，Shift+Enter 换行'}
+            </p>
+
+            {/* 历史问答 (只显示当前这轮) */}
+            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+              {interview.question && (
+                <div className="surface p-3 bg-[var(--paper-softsink)]">
+                  <div className="label-mono text-[10px] mb-1">YOU</div>
+                  <p className="font-serif text-sm">{interview.question}</p>
+                </div>
+              )}
+              {interview.loading && (
+                <div className="surface p-3">
+                  <div className="label-mono text-[10px] mb-1">{interview.characterName.toUpperCase()}</div>
+                  <p className="font-mono text-sm text-[var(--ink-muted)] typing-cursor">▸ 思考中</p>
+                </div>
+              )}
+              {!interview.loading && interview.answer && (
+                <div className="surface p-3">
+                  <div className="label-mono text-[10px] mb-1">{interview.characterName.toUpperCase()}</div>
+                  <p className="font-serif text-sm leading-relaxed whitespace-pre-wrap">{interview.answer}</p>
+                </div>
+              )}
+            </div>
+
+            {/* 输入区 */}
+            <div className="mt-3 shrink-0 border-t-[2.5px] border-[var(--ink)] pt-3">
+              <textarea
+                className="textarea"
+                rows={2}
+                placeholder={`问 ${interview.characterName} 一个问题…`}
+                value={interviewDraft}
+                onChange={e => setInterviewDraft(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    if (interviewDraft.trim() && !interview.loading) {
+                      handleInterview(interview.characterId, interviewDraft);
+                      setInterviewDraft('');
+                    }
+                  }
+                }}
+                disabled={interview.loading}
+              />
+              <div className="flex justify-end gap-2 mt-2">
+                <button
+                  onClick={() => setInterview(null)}
+                  className="btn btn-ghost btn-sm"
+                >关闭</button>
+                <button
+                  onClick={() => {
+                    if (interviewDraft.trim()) {
+                      handleInterview(interview.characterId, interviewDraft);
+                      setInterviewDraft('');
+                    }
+                  }}
+                  disabled={interview.loading || !interviewDraft.trim()}
+                  className="btn btn-primary btn-sm"
+                >
+                  <Send width={14} height={14} /> 发送
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 结束确认 */}
       {endConfirm && (
         <div className="fixed inset-0 z-50 bg-[rgba(17,17,17,0.55)] flex items-center justify-center p-4 anim-fade-in"
@@ -429,6 +669,16 @@ export default function PlayPage() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ReflectionBlock({ label, body }: { label: string; body: string }) {
+  if (!body) return null;
+  return (
+    <div>
+      <div className="label-mono text-[10px] mb-1.5">{label}</div>
+      <p className="font-serif text-sm leading-relaxed">{body}</p>
     </div>
   );
 }

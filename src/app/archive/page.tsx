@@ -12,13 +12,27 @@ function ArchiveContent() {
   const searchParams = useSearchParams();
   const saveId = searchParams.get('id');
   const [save, setSave] = useState<GameSave | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    if (saveId) {
+    if (!saveId) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSave(loadSave(saveId));
+      setLoading(false);
+      return;
     }
+    let cancelled = false;
+    loadSave(saveId).then((s) => {
+      if (!cancelled) {
+        setSave(s);
+        setLoading(false);
+      }
+    });
+    return () => { cancelled = true; };
   }, [saveId]);
+
+  if (loading) {
+    return <div className="min-h-screen flex items-center justify-center text-[var(--ink-muted)]">加载存档中...</div>;
+  }
 
   if (!save) {
     return (

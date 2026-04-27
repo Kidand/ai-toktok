@@ -48,8 +48,27 @@
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { Agent, setGlobalDispatcher } from 'undici';
 import { parseStoryClient } from '../src/lib/parser-client';
-import type { ParsedStory, Character, KeyEvent, Location, LLMProvider } from '../src/lib/types';
+import type {
+  ParsedStory, Character, KeyEvent, Location, LLMProvider,
+  WorldEntity, Faction, Relationship, LoreEntry, TimelineEvent,
+  IPProject,
+} from '../src/lib/types';
+
+// Node 22 + some upstream LLM endpoints (DeepSeek among them) trip a TLS
+// race that surfaces as `fetch failed ECONNRESET` 30-50 ms into the call.
+// curl / Python urllib are unaffected because they handle dual-stack
+// resolution differently. Forcing a known-good undici Agent with explicit
+// IPv4 + generous keep-alive timeouts sidesteps the issue without
+// regressing other providers.
+setGlobalDispatcher(new Agent({
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
+  connect: { timeout: 30_000, family: 4 },
+  bodyTimeout: 180_000,
+  headersTimeout: 60_000,
+}));
 
 // ----- tiny arg parser ----------------------------------------------------
 type Args = {
@@ -185,14 +204,114 @@ function remapToSlugs(raw: ParsedStory, slug: string): ParsedStory {
     return { ...l, id };
   });
 
-  const newEvents: KeyEvent[] = raw.keyEvents.map((e, i) => ({
-    ...e,
-    id: `event:e${String(i + 1).padStart(2, '0')}`,
-    involvedCharacterIds: e.involvedCharacterIds
-      .map(id => charMap.get(id))
-      .filter((s): s is string => !!s),
-    locationId: e.locationId ? locMap.get(e.locationId) : undefined,
-  }));
+  const eventMap: IdMap = new Map();
+  const newEvents: KeyEvent[] = raw.keyEvents.map((e, i) => {
+    const id = `event:e${String(i + 1).padStart(2, '0')}`;
+    eventMap.set(e.id, id);
+    return {
+      ...e,
+      id,
+      involvedCharacterIds: e.involvedCharacterIds
+        .map(cid => charMap.get(cid))
+        .filter((s): s is string => !!s),
+      locationId: e.locationId ? locMap.get(e.locationId) : undefined,
+    };
+  });
+
+  // ---- Phase 2 derived tables --------------------------------------------
+  // Project envelope: re-key to preset:<slug>; child rows reference the same id.
+  const projectId = storyId;
+  const newProject: IPProject | undefined = raw.project ? {
+    ...raw.project,
+    id: projectId,
+    title: raw.title,
+    updatedAt: Date.now(),
+  } : undefined;
+
+  // Entities are a union view across characters/locations/events/factions.
+  // Reuse the slugs we already minted above when name+type matches; otherwise
+  // assign a stable per-type slug.
+  const factionMap: IdMap = new Map();
+  const entityIdMap: IdMap = new Map();
+  let factionCounter = 0;
+  const newEntities: WorldEntity[] | undefined = raw.entities ? raw.entities.map((e) => {
+    let id = e.id;
+    if (e.type === 'character') {
+      const match = newCharacters.find(c => c.name === e.name);
+      if (match) id = match.id;
+    } else if (e.type === 'location') {
+      const match = newLocations.find(l => l.name === e.name);
+      if (match) id = match.id;
+    } else if (e.type === 'event') {
+      const match = newEvents.find(ev => ev.title === e.name);
+      if (match) id = match.id;
+    } else if (e.type === 'faction') {
+      factionCounter++;
+      id = `fac:f${String(factionCounter).padStart(2, '0')}`;
+      factionMap.set(e.id, id);
+    } else {
+      id = `ent:x${String(entityIdMap.size + 1).padStart(2, '0')}`;
+    }
+    entityIdMap.set(e.id, id);
+    return { ...e, id, projectId };
+  }) : undefined;
+
+  // Factions live in their own table too; mint stable slugs and reuse the
+  // entity-side faction slug when names line up.
+  const newFactions: Faction[] | undefined = raw.factions ? raw.factions.map((f, i) => {
+    const matchEntity = newEntities?.find(e => e.type === 'faction' && e.name === f.name);
+    const id = matchEntity?.id || `fac:f${String(i + 1).padStart(2, '0')}`;
+    factionMap.set(f.id, id);
+    return {
+      ...f,
+      id,
+      projectId,
+      memberEntityIds: (f.memberEntityIds || [])
+        .map(eid => entityIdMap.get(eid) || eid),
+    };
+  }) : undefined;
+
+  // Relationships: re-key sourceEntityId / targetEntityId via the entity map
+  // (which covers characters by character id since their slug is identical
+  // to the entity slug).
+  const relIdMap: IdMap = new Map();
+  const newRelationships: Relationship[] | undefined = raw.relationships ? raw.relationships
+    .map((r, i): Relationship | null => {
+      const id = `rel:r${String(i + 1).padStart(2, '0')}`;
+      relIdMap.set(r.id, id);
+      const src = entityIdMap.get(r.sourceEntityId)
+        || charMap.get(r.sourceEntityId)
+        || r.sourceEntityId;
+      const tgt = entityIdMap.get(r.targetEntityId)
+        || charMap.get(r.targetEntityId)
+        || r.targetEntityId;
+      return {
+        ...r,
+        id, projectId,
+        sourceEntityId: src,
+        targetEntityId: tgt,
+      };
+    })
+    .filter((x): x is Relationship => x !== null) : undefined;
+
+  // LoreEntries: their relatedEntityIds may point at characters/factions/etc.
+  const newLoreEntries: LoreEntry[] | undefined = raw.loreEntries ? raw.loreEntries.map((l, i) => ({
+    ...l,
+    id: `lore:l${String(i + 1).padStart(2, '0')}`,
+    projectId,
+    relatedEntityIds: (l.relatedEntityIds || [])
+      .map(eid => entityIdMap.get(eid) || charMap.get(eid) || eid),
+  })) : undefined;
+
+  // TimelineEvents share ids with KeyEvents when titles align.
+  const newTimelineEvents: TimelineEvent[] | undefined = raw.timelineEvents ? raw.timelineEvents.map((te) => {
+    const matched = newEvents.find(ke => ke.title === te.title);
+    return {
+      ...te,
+      id: matched?.id || eventMap.get(te.id) || te.id,
+      projectId,
+    };
+  }) : undefined;
 
   return {
     id: storyId,
@@ -204,6 +323,13 @@ function remapToSlugs(raw: ParsedStory, slug: string): ParsedStory {
     locations: newLocations,
     keyEvents: newEvents,
     timelineDescription: raw.timelineDescription,
+    // Phase 2 additive fields — only emitted when present.
+    project: newProject,
+    entities: newEntities,
+    factions: newFactions,
+    relationships: newRelationships,
+    loreEntries: newLoreEntries,
+    timelineEvents: newTimelineEvents,
   };
 }
 
@@ -263,6 +389,52 @@ function emitTsModule(story: ParsedStory): string {
   lines.push(`  ],`);
 
   lines.push(`  timelineDescription: ${tsString(story.timelineDescription)},`);
+
+  // Phase 2 additive tables — only emit when populated. Keeping them
+  // optional means presets generated under prompt v4 stay readable.
+  if (story.project) {
+    lines.push(`  project: ${JSON.stringify(story.project, null, 2).replace(/\n/g, '\n  ')},`);
+  }
+  if (story.entities && story.entities.length > 0) {
+    lines.push(`  entities: [`);
+    for (const e of story.entities) {
+      lines.push(`    // [${e.type}] ${e.name}`);
+      lines.push(`    ${JSON.stringify(e, null, 2).replace(/\n/g, '\n    ')},`);
+    }
+    lines.push(`  ],`);
+  }
+  if (story.factions && story.factions.length > 0) {
+    lines.push(`  factions: [`);
+    for (const f of story.factions) {
+      lines.push(`    // ${f.name}`);
+      lines.push(`    ${JSON.stringify(f, null, 2).replace(/\n/g, '\n    ')},`);
+    }
+    lines.push(`  ],`);
+  }
+  if (story.relationships && story.relationships.length > 0) {
+    lines.push(`  relationships: [`);
+    for (const r of story.relationships) {
+      lines.push(`    ${JSON.stringify(r, null, 2).replace(/\n/g, '\n    ')},`);
+    }
+    lines.push(`  ],`);
+  }
+  if (story.loreEntries && story.loreEntries.length > 0) {
+    lines.push(`  loreEntries: [`);
+    for (const l of story.loreEntries) {
+      lines.push(`    // ${l.title}`);
+      lines.push(`    ${JSON.stringify(l, null, 2).replace(/\n/g, '\n    ')},`);
+    }
+    lines.push(`  ],`);
+  }
+  if (story.timelineEvents && story.timelineEvents.length > 0) {
+    lines.push(`  timelineEvents: [`);
+    for (const t of story.timelineEvents) {
+      lines.push(`    // ${t.title}`);
+      lines.push(`    ${JSON.stringify(t, null, 2).replace(/\n/g, '\n    ')},`);
+    }
+    lines.push(`  ],`);
+  }
+
   lines.push(`};`);
   lines.push('');
   return lines.join('\n');

@@ -1,4 +1,27 @@
 // ===== 核心类型定义 =====
+//
+// This file is the legacy single-file type module. Phase 1 introduced
+// `src/lib/types/` (world.ts / agent.ts / scene.ts / runtime.ts) for the
+// blueprint domain model; we re-export everything from there at the bottom
+// of this file so existing `import { Foo } from '@/lib/types'` calls keep
+// working without churn.
+
+export type {
+  // world.ts
+  SourceRef, WorldEntityType, WorldEntity, Faction, Relationship,
+  LoreEntry, TimelineEvent, SourceChunk, IPProjectStatus,
+  IPProjectBuildConfig, IPProject,
+  // agent.ts
+  AgentRelationshipRef, AgentBehaviorRule, AgentProfile,
+  UserIdentityType, UserIdentity,
+  // scene.ts
+  SceneStatus, ConflictStage, ConflictState, Scene, SceneState,
+  SpeakerType, ConversationMessage,
+  // runtime.ts
+  MemoryScope, RuntimeMemory, RelationshipChange, MemoryUpdate,
+  ConflictChange, TimelineUpdate, StateDelta,
+  StoryArcStats, StoryArcReport,
+} from './types/index';
 
 /** LLM 提供商 */
 export type LLMProvider = 'openai' | 'anthropic';
@@ -58,6 +81,27 @@ export interface ParsedStory {
   locations: Location[];
   keyEvents: KeyEvent[];
   timelineDescription: string;
+
+  // ---- Phase 1 additive fields. All optional so old saves & presets stay
+  //      valid. Phase 2's world_builder will populate them; until then they
+  //      may be undefined and code paths must default-guard.
+  /**
+   * Container record. When present, identifies the story as belonging to a
+   * named project with its own buildConfig (import goal, etc.).
+   */
+  project?: import('./types/index').IPProject;
+  /** Unified entity table — characters/locations/factions/items/concepts. */
+  entities?: import('./types/index').WorldEntity[];
+  /** Standalone faction records (also addressable through entities[]). */
+  factions?: import('./types/index').Faction[];
+  /** Top-level relationship table (vs. the legacy embedded form). */
+  relationships?: import('./types/index').Relationship[];
+  /** Keyword-triggered lore for the L4 injection layer. */
+  loreEntries?: import('./types/index').LoreEntry[];
+  /** Causal timeline (richer than `keyEvents`). */
+  timelineEvents?: import('./types/index').TimelineEvent[];
+  /** Pre-generated NPC AgentProfiles, when produced by agent_factory. */
+  agents?: import('./types/index').AgentProfile[];
 }
 
 /** 介入方式 */
@@ -80,6 +124,22 @@ export interface NarrativeBalance {
 export interface GuardrailParams {
   temperature: number;  // 0.0-1.0 随机性
   strictness: number;   // 0.0-1.0 严谨度
+}
+
+/**
+ * 角色/地点信息的注入策略。
+ * - `full`：旧行为，所有非玩家角色 + 所有地点全量注入（保留作为安全回滚）
+ * - `smart`：只把"常驻 + 触发命中 + 1 度关系扩散"展开成详情，其余角色仅一行花名册，
+ *   未触发的地点完全省略
+ */
+export interface InjectionConfig {
+  mode: 'smart' | 'full';
+  /** smart 模式下扫描最近多少条 narrativeHistory 找触发词 */
+  windowSize: number;
+  /** 沿 relationships 扩散的深度，0 表示禁用 */
+  expandDepth: 0 | 1;
+  /** 详情角色集合的硬上限（防止扩散后 prompt 失控） */
+  maxTriggered: number;
 }
 
 /** 选项 */
@@ -133,6 +193,12 @@ export interface GameSave {
   updatedAt: number;
   isCompleted: boolean;
   epilogue?: EpilogueEntry[];
+  /**
+   * End-of-run story arc recap (Phase: post-Phase-8 expansion). Optional —
+   * older completed saves don't have it; the epilogue UI falls back to
+   * just memoirs in that case.
+   */
+  storyArc?: import('./types/index').StoryArcReport;
 }
 
 /** 游戏状态 */
@@ -143,6 +209,7 @@ export interface GameState {
   playerConfig: PlayerConfig | null;
   guardrailParams: GuardrailParams;
   narrativeBalance: NarrativeBalance;
+  injectionConfig: InjectionConfig;
 
   // 游戏进行中状态
   isPlaying: boolean;
@@ -154,4 +221,21 @@ export interface GameState {
 
   // 存档列表
   saves: GameSave[];
+
+  /**
+   * Pointer to the last `setParsedStory()` argument's id. Persisted in
+   * localStorage so a hard refresh between 解析完成 and startGame can still
+   * rehydrate parsedStory from IDB even before any save exists.
+   */
+  lastStoryId: string | null;
+
+  /**
+   * IndexedDB 异步 hydrate 完成与否。
+   *
+   * localStorage 部分（小字段）在 store 创建时已同步就位；parsedStory /
+   * narrativeHistory / characterInteractions / saves 这几个大字段需要异步从 IDB
+   * 读出。落地 /play 或 /epilogue 时若 currentSaveId 存在但 _hydrated 仍为 false，
+   * UI 应当显示加载态，避免误判为"还没完成设置"。
+   */
+  _hydrated: boolean;
 }

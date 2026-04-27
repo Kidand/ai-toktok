@@ -3,7 +3,7 @@
 import { useEffect, useState, Suspense, useRef } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
-import { GameSave, EpilogueEntry } from '@/lib/types';
+import { GameSave, EpilogueEntry, StoryArcReport } from '@/lib/types';
 import { loadSave } from '@/lib/storage';
 import { generateEpilogueBrowser, type EpilogueStreamState } from '@/lib/narrator-browser';
 import { speakerColor } from '@/components/NarrativeFeed';
@@ -17,28 +17,34 @@ function EpilogueContent() {
 
   const { parsedStory, playerConfig, llmConfig, characterInteractions, narrativeHistory, completeGame } = useGameStore();
 
-  const [data, setData] = useState<{ save: GameSave | null; epilogue: EpilogueEntry[] }>({ save: null, epilogue: [] });
+  const [data, setData] = useState<{
+    save: GameSave | null;
+    epilogue: EpilogueEntry[];
+    storyArc?: StoryArcReport;
+  }>({ save: null, epilogue: [] });
   const [visibleCount, setVisibleCount] = useState(0);
   const [streamState, setStreamState] = useState<EpilogueStreamState | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const generationTriggered = useRef(false);
-  const { save, epilogue } = data;
+  const { save, epilogue, storyArc } = data;
 
   useEffect(() => {
-    let loaded: GameSave | null = null;
-    if (saveId) {
-      loaded = loadSave(saveId);
-    } else {
+    let cancelled = false;
+    const resolve = async (): Promise<GameSave | null> => {
+      if (saveId) return await loadSave(saveId);
       const storeSaves = useGameStore.getState().saves;
       const currentSaveId = useGameStore.getState().currentSaveId;
-      loaded = storeSaves.find(s => s.id === currentSaveId) || null;
-    }
-    if (loaded?.epilogue && loaded.epilogue.length > 0) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setData({ save: loaded, epilogue: loaded.epilogue });
-    } else if (loaded) {
-      setData(d => ({ ...d, save: loaded }));
-    }
+      return storeSaves.find(s => s.id === currentSaveId) || null;
+    };
+    resolve().then((loaded) => {
+      if (cancelled) return;
+      if (loaded?.epilogue && loaded.epilogue.length > 0) {
+        setData({ save: loaded, epilogue: loaded.epilogue, storyArc: loaded.storyArc });
+      } else if (loaded) {
+        setData(d => ({ ...d, save: loaded }));
+      }
+    });
+    return () => { cancelled = true; };
   }, [saveId]);
 
   useEffect(() => {
@@ -51,7 +57,7 @@ function EpilogueContent() {
     generationTriggered.current = true;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setGenerateError(null);
-    setStreamState({ entries: [], expectedCount: 0 });
+    setStreamState({ phase: 'arc', entries: [], expectedCount: 0 });
 
     generateEpilogueBrowser(
       llmConfig, parsedStory, playerConfig,
@@ -60,7 +66,7 @@ function EpilogueContent() {
     )
       .then(result => {
         completeGame(result);
-        setData(d => ({ ...d, epilogue: result }));
+        setData(d => ({ ...d, epilogue: result.memoirs, storyArc: result.storyArc }));
         setStreamState(null);
         router.replace('/epilogue');
       })
@@ -86,6 +92,9 @@ function EpilogueContent() {
 
   const isGenerating = !!streamState;
   const hasEpilogue = epilogue.length > 0;
+  // Show the arc card whenever we have one — either freshly generated and
+  // sitting in `streamState.arcReport`, or rehydrated from a save.
+  const arcToShow: StoryArcReport | undefined = streamState?.arcReport || storyArc;
 
   if (!hasEpilogue && !isGenerating && !generateError) {
     return (
@@ -131,6 +140,10 @@ function EpilogueContent() {
           <EpilogueProgress state={streamState} />
         )}
 
+        {/* 故事弧摘要（旅程总结）——一旦 arcReport 出现就开始展示，
+            随后开始流 memoirs 时仍保留在顶部 */}
+        {arcToShow && <ArcSummaryCard arc={arcToShow} />}
+
         {/* 错误 */}
         {generateError && (
           <div className="surface p-5 mb-6" style={{ boxShadow: '4px 4px 0 var(--hi-coral)' }}>
@@ -150,18 +163,41 @@ function EpilogueContent() {
           </div>
         )}
 
+        {/* memoirs 区段标题 —— 在 arc 显示完后再出现 */}
+        {(isGenerating && streamState?.phase === 'memoirs') || hasEpilogue ? (
+          <h3 className="chapter-head mb-4">
+            <span className="ordinal">∾</span> · 主要角色的回忆
+          </h3>
+        ) : null}
+
         {/* 流式中的卡片 */}
         {isGenerating && streamState && streamState.entries.length > 0 && (
           <section className="space-y-6 mb-8">
-            {streamState.entries.map((entry, idx) => (
-              <MemoirPostcard
-                key={`stream-${idx}`}
-                index={idx}
-                characterName={entry.characterName}
-                memoir={entry.memoir}
-                isPartial={!!entry.partial}
-              />
-            ))}
+            {streamState.entries.map((entry, idx) => {
+              // While an entry is partial AND its characterName hasn't been
+              // emitted yet (LLM put `memoir` before `characterName`), defer
+              // showing the memoir text — otherwise the visible memoir will
+              // appear to swap to a different speaker once the name finally
+              // arrives. Once we have a name (even partial), it's safe to
+              // stream both fields together.
+              const safeMemoir = (entry.partial && !entry.characterName)
+                ? ''
+                : entry.memoir;
+              // Use characterName as the React key once it's known so a
+              // late-arriving name doesn't reuse a previous card's DOM.
+              const key = entry.characterName
+                ? `stream-name-${entry.characterName}-${idx}`
+                : `stream-pending-${idx}`;
+              return (
+                <MemoirPostcard
+                  key={key}
+                  index={idx}
+                  characterName={entry.characterName}
+                  memoir={safeMemoir}
+                  isPartial={!!entry.partial}
+                />
+              );
+            })}
           </section>
         )}
 
@@ -217,6 +253,33 @@ function EpilogueContent() {
 }
 
 function EpilogueProgress({ state }: { state: EpilogueStreamState }) {
+  // Arc phase: show an indeterminate "正在做旅程总结" placeholder with a
+  // pulsing 25% bar so the user knows something's happening.
+  if (state.phase === 'arc') {
+    return (
+      <div className="surface p-5 mb-6 anim-fade-in">
+        <div className="flex items-center justify-between mb-3 gap-3">
+          <div>
+            <div className="label-mono">PHASE 1 / 2</div>
+            <p className="font-sans font-bold text-sm mt-0.5">
+              正在为旅程做总结...
+            </p>
+          </div>
+          <span className="font-mono text-lg font-bold tabular-nums bg-[var(--hi-cyan)] border-2 border-[var(--ink)] px-3 py-1" style={{ boxShadow: '2px 2px 0 var(--ink)' }}>
+            起 · 承 · 转 · 合
+          </span>
+        </div>
+        <div className="ticked-progress">
+          <div className="ticked-progress-fill" style={{ width: '25%' }} />
+        </div>
+        <p className="text-[11px] text-[var(--ink-muted)] mt-2 font-mono">
+          {'// 把这场独有的旅程压缩成"起 / 承 / 转 / 合"四段式'}
+        </p>
+      </div>
+    );
+  }
+
+  // Memoirs phase: completion-driven progress as before.
   const completedCount = state.entries.filter(e => !e.partial).length;
   const total = state.expectedCount;
   const pct = total > 0
@@ -227,10 +290,10 @@ function EpilogueProgress({ state }: { state: EpilogueStreamState }) {
     <div className="surface p-5 mb-6 anim-fade-in">
       <div className="flex items-center justify-between mb-3 gap-3">
         <div>
-          <div className="label-mono">GENERATING</div>
+          <div className="label-mono">PHASE 2 / 2 · GENERATING</div>
           <p className="font-sans font-bold text-sm mt-0.5">
             {completedCount === 0
-              ? '正在召唤各角色的回忆...'
+              ? '正在召唤主要角色的回忆...'
               : `已完成 ${completedCount} / ${total || '?'} 位`}
           </p>
         </div>
@@ -242,9 +305,79 @@ function EpilogueProgress({ state }: { state: EpilogueStreamState }) {
         <div className="ticked-progress-fill" style={{ width: `${pct}%` }} />
       </div>
       <p className="text-[11px] text-[var(--ink-muted)] mt-2 font-mono">
-        {'// 每位角色基于本次游玩经历以第一人称写下对你的回忆'}
+        {'// 与玩家有 ≥5 轮交集且情感强度足够的角色，以第一人称写下回忆'}
       </p>
     </div>
+  );
+}
+
+/**
+ * Story-arc summary card. Shows the four phases (起承转合) in
+ * sequence plus a row of stat chips. Survives reload because it's
+ * persisted on `GameSave.storyArc`.
+ */
+function ArcSummaryCard({ arc }: { arc: StoryArcReport }) {
+  const phases: { label: string; mark: string; body: string }[] = [
+    { label: '起', mark: 'OPENING', body: arc.qi },
+    { label: '承', mark: 'BUILD',   body: arc.cheng },
+    { label: '转', mark: 'TURN',    body: arc.zhuan },
+    { label: '合', mark: 'CLOSE',   body: arc.he },
+  ].filter(p => p.body);
+
+  return (
+    <article className="surface-raised p-5 sm:p-6 mb-8 anim-slide-up"
+             style={{ transform: 'rotate(-0.2deg)' }}>
+      <header className="mb-4 pb-3 border-b-[2.5px] border-[var(--ink)] flex items-center gap-3 flex-wrap">
+        <span className="stamp" style={{ transform: 'rotate(-1.5deg)' }}>STORY ARC</span>
+        <h2 className="display text-xl sm:text-2xl">这场旅程的弧度</h2>
+      </header>
+
+      {phases.length > 0 ? (
+        <ol className="space-y-3 mb-5">
+          {phases.map((p, i) => (
+            <li key={i} className="flex gap-3">
+              <span className="font-mono font-bold text-sm bg-[var(--ink)] text-[var(--paper)] px-2 py-1 shrink-0 rounded-[3px] h-fit">
+                {p.label}
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="label-mono text-[10px] mb-1">{p.mark}</div>
+                <p className="font-serif text-[15px] leading-relaxed">{p.body}</p>
+              </div>
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <p className="font-mono text-sm text-[var(--ink-muted)] mb-5">
+          {'// 故事弧总结生成失败，以下为统计指标'}
+        </p>
+      )}
+
+      <div className="border-t-[2px] border-[var(--ink)] pt-3">
+        <div className="label-mono text-[10px] mb-2">JOURNEY METRICS</div>
+        <div className="flex flex-wrap gap-2">
+          <StatChip label="互动轮次" value={arc.stats.totalTurns} unit="轮" />
+          <StatChip label="到访场景" value={arc.stats.locationsVisited} unit="处" />
+          <StatChip label="对话角色" value={arc.stats.dialogueCharacters} unit="人" />
+          <StatChip label="群体事件" value={arc.stats.groupSceneCount} unit="次" />
+          <StatChip label="关系变动" value={arc.stats.relationshipShifts} unit="次"
+                    accent={arc.stats.relationshipShifts > 0} />
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function StatChip({ label, value, unit, accent }: { label: string; value: number; unit?: string; accent?: boolean }) {
+  return (
+    <span
+      className={accent ? 'chip chip-accent' : 'chip'}
+      style={{ padding: '4px 10px', fontSize: '0.78rem' }}
+    >
+      <span className="text-[var(--ink-muted)] font-mono">{label}</span>
+      <span className="font-mono font-bold text-[var(--ink)] tabular-nums">
+        {' '}{value}{unit || ''}
+      </span>
+    </span>
   );
 }
 

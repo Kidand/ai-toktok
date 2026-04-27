@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Space_Grotesk, JetBrains_Mono, Noto_Serif_SC } from "next/font/google";
 import "./globals.css";
+import { StoreHydrator } from "@/components/StoreHydrator";
 
 const spaceGrotesk = Space_Grotesk({
   subsets: ["latin"],
@@ -50,6 +51,7 @@ export default function RootLayout({
           fontFamily: `var(--font-space-grotesk), 'Space Grotesk', 'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif`,
         }}
       >
+        <StoreHydrator />
         {children}
       </body>
     </html>

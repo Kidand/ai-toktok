@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { LLMConfig, LLMProvider, GameSave } from '@/lib/types';
-import { loadStory, deleteSave, saveStory } from '@/lib/storage';
+import { loadStory } from '@/lib/storage';
 import { parseStoryClient } from '@/lib/parser-client';
 import { verifyLLMConfig } from '@/lib/llm-browser';
 import { PRESETS, type Preset } from '@/lib/presets';
@@ -20,7 +20,7 @@ export default function HomePage() {
   const router = useRouter();
   const {
     llmConfig, setLLMConfig, setParsedStory, setIsParsing, isParsing,
-    saves, loadSaves, loadFromSave, init,
+    saves, loadSaves, loadFromSave, removeSave, init,
   } = useGameStore();
 
   const [mounted, setMounted] = useState(false);
@@ -35,6 +35,7 @@ export default function HomePage() {
   const [tab, setTab] = useState<'presets' | 'new' | 'saves'>('presets');
   const [showApiDetails, setShowApiDetails] = useState(false);
   const [verify, setVerify] = useState<VerifyState>({ status: 'idle' });
+  const [importGoal, setImportGoal] = useState<'faithful' | 'free_rewrite' | 'companion' | 'scenario'>('faithful');
 
   useEffect(() => { init(); setMounted(true); }, [init]);
 
@@ -104,6 +105,11 @@ export default function HomePage() {
 
     try {
       const result = await parseStoryClient(config, storyText, (p) => setParseProgress(p));
+      // Stamp the import goal onto the project envelope so downstream
+      // prompts (Phase 7+) can pick alternative system-prompt flavours.
+      if (result.project) {
+        result.project = { ...result.project, buildConfig: { ...result.project.buildConfig, importGoal } };
+      }
       setParsedStory(result);
       router.push('/setup');
     } catch (err) {
@@ -113,19 +119,18 @@ export default function HomePage() {
     }
   };
 
-  const handleLoadSave = (save: GameSave) => {
-    const story = loadStory(save.storyId);
-    if (!story) { setError('找不到对应的故事数据'); return; }
+  const handleLoadSave = async (save: GameSave) => {
     if (!apiKey.trim()) { setError('请先配置 API 密钥'); return; }
+    const story = await loadStory(save.storyId);
+    if (!story) { setError('找不到对应的故事数据'); return; }
     setLLMConfig(buildConfig());
     loadFromSave(save, story);
     router.push('/play');
   };
 
-  const handleDeleteSave = (saveId: string) => {
+  const handleDeleteSave = async (saveId: string) => {
     if (!confirm('确定删除这个存档？')) return;
-    deleteSave(saveId);
-    loadSaves();
+    await removeSave(saveId);
   };
 
   const handlePickPreset = async (preset: Preset) => {
@@ -148,9 +153,9 @@ export default function HomePage() {
     }
 
     setLLMConfig(config);
-    // Persist the preset's ParsedStory to localStorage so later saves can
-    // reload the story by id like a user-uploaded one.
-    saveStory(preset.story);
+    // setParsedStory now persists the story to IndexedDB internally, so saves
+    // generated from this preset can later reload the body by id like any
+    // user-uploaded story.
     setParsedStory(preset.story);
     router.push('/setup');
   };
@@ -364,6 +369,25 @@ export default function HomePage() {
             <textarea className="textarea" value={storyText} onChange={e => setStoryText(e.target.value)}
                       placeholder="在此粘贴故事原文……" rows={6} />
 
+            <div className="mt-3">
+              <span className="label-mono block mb-1.5">IMPORT GOAL · 想要怎么玩</span>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {[
+                  { v: 'faithful', label: '原著还原', hint: '严格贴合' },
+                  { v: 'free_rewrite', label: '自由改写', hint: '可大幅偏离' },
+                  { v: 'companion', label: '情感陪伴', hint: '低冲突日常' },
+                  { v: 'scenario', label: '剧情推演', hint: '高密度事件' },
+                ].map(opt => (
+                  <button key={opt.v} type="button"
+                          onClick={() => setImportGoal(opt.v as typeof importGoal)}
+                          className={`choice-card p-2 ${importGoal === opt.v ? 'is-active' : ''}`}>
+                    <div className="font-sans font-bold text-sm">{opt.label}</div>
+                    <p className="text-[10px] text-[var(--ink-muted)] mt-0.5 font-mono">{opt.hint}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             {error && (
               <div className="mt-3 p-3 border-[2.5px] border-[var(--ink)] bg-[var(--hi-coral-soft)] font-mono text-sm">
                 ⚠ {error}
@@ -458,8 +482,8 @@ export default function HomePage() {
                         回顾
                       </button>
                       {save.isCompleted && save.epilogue ? (
-                        <button onClick={() => {
-                          const story = loadStory(save.storyId);
+                        <button onClick={async () => {
+                          const story = await loadStory(save.storyId);
                           if (story) { loadFromSave(save, story); router.push('/epilogue'); }
                         }} className="btn btn-cyan btn-sm">
                           后日谈

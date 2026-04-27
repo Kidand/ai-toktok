@@ -56,6 +56,14 @@ npm run dev
 - **转生**：AI 按世界观生成一个全新原创角色让你代入
 - 可选择从任意关键事件节点切入故事
 - 双变量护栏 + 叙事/对话比重：温度、严谨度、narrative weight 实时调节 LLM 行为
+- **导入目标（import goal）** 4 选 1：原著还原 / 自由改写 / 情感陪伴 / 剧情推演——选项作为 modifier 注入到对话 prompt 顶层，影响整局基调
+
+### 世界总览 `/world`
+对当前导入或预设的 IP 一屏看完：
+- **登场角色** 卡片网格
+- **关系网**（SVG 圆形布局）：节点是首字母 + 稳定色；线颜色映射倾向（mint 亲近 / coral 敌对 / ink 中立），线宽映射强度；**鼠标悬停节点弹出全名标签**
+- **地点 / 阵营 / 时间线（带因果）/ 设定典籍**——后四类对应 World Builder 增强阶段从原文抽出的 factions / loreEntries / timelineEvents.causes&consequences；旧版本 preset 没这些字段时该章节自动不显示
+- 入口：play 顶栏 🌐 图标，或直接访问 `/world`
 
 ### 互动游玩
 - **脚本体叙事流**：每次叙事前有一条 `── T03 ────────` 分幕线；narration 以中文衬线散文呈现；NPC 对白是一个彩色**说话者标签**挂在厚边线框内容块上方；玩家动作渲染为等宽字 + 荧光黄 banner，前缀 `▸`，像终端命令
@@ -74,15 +82,22 @@ npm run dev
 - **系统与角色同回合互斥**：一旦 @ 了其中一类，另一类自动灰掉，避免意图歧义
 - Mention 以原子 chip 形式占位，点 × 或键盘 Backspace 可删
 
+### 剧情回响 · 深度访谈
+play 顶栏新增两个浮层入口，**都不写入 `narrativeHistory`，不影响主线**：
+
+- **剧情回响**（4 轮以上互动后亮起）：调用 LLM 生成结构化总结——本段摘要 / 玩家影响 / 情绪基调 / 关系变化 / 线索方向 / 下一幕建议；四种字段自适应展开，`relationshipChanges` 只在确实有情感转折时填充
+- **深问 ${角色}**（角色侧栏展开卡片中）：内嵌输入浮层，textarea + Enter 提交 + Shift+Enter 换行，回答以同一对话框的卡片形式呈现；prompt 强制以 NPC 自己的口吻、persona 与说话风格回答，并禁止泄漏未来剧情
+- 浮层风格沿用野兽派：厚边线框 + 硬投影 + 等宽字 label
+
 ### 档案与结局
 - **运行时状态持久化**：Zustand 中间件把游戏中的 parsedStory / playerConfig / narrativeHistory 等落到 `localStorage`，页面刷新或路由切换不丢状态
 - **自动存档**：每次叙事完成后写入存档
 - **回顾模式**：按时间轴重放整段故事 + 角色好感统计（正面/中立/负面 stack 进度条）
-- **后日谈流式生成**：点击"结束故事"立即跳转到 `/epilogue` 页面，生成过程在这里进行——
-  - 顶部 determinate 进度条（`已完成 N / 总数 M`）
-  - 每位角色的回忆**一张张浮现**（LLM 返回的 JSON 数组用 partial-JSON 解析器边流边解）
-  - 最后一位回忆的卡片带打字光标实时写作
-  - 回忆基于**本次游玩的完整叙事记录 + 角色 personality + 情感轨迹**生成，不是原作剧情的改写
+- **结束故事 → 后日谈两阶段生成**：点击"结束故事"跳转到 `/epilogue`，**串行生成两类内容**——
+  1. **故事弧摘要**（Phase 1 / 2）：一次 LLM 调用产出"起 / 承 / 转 / 合"四段式 200-400 字回顾，主语固定为玩家；卡片下方一排数据胶囊：互动轮次 / 到访场景 / 对话角色 / 群体事件 / 关系变动（数据全部来自 `narrativeHistory` + `characterInteractions` 的纯计算，不依赖 LLM 也能显示）
+  2. **主要角色回忆**（Phase 2 / 2）：仅为"≥5 轮交集 ∧ ≥1 项情感非中立"的主要角色生成第一人称 memoir；短玩局兜底回退到"任意有交集即可"，确保不会 0 卡片；回忆按 LLM 返回顺序流式浮现，最后一位带打字光标
+  - **角色↔回忆错配防护**：三层匹配（exact → 双向 includes 模糊 → 按位置对齐）+ JSON 容错（key 缺右引号、尾随逗号自动修复）+ 漏写角色补占位文字
+- 完成的 `storyArc` + `epilogue` 一并写入 `GameSave`，老存档没 `storyArc` 字段时 UI 自动只显示 memoirs
 
 ### 推理模型兼容
 支持 DeepSeek-R1 / MiniMax-M 系列 / Qwen/GLM 推理版 等会把 `<think>…</think>` 塞进 `content` 的模型：
@@ -188,16 +203,40 @@ ANTHROPIC_API_KEY=sk-ant-xxx npm run build-preset -- \
 │   ├── lib/               # 核心逻辑
 │   │   ├── llm-browser       OpenAI / Anthropic 流式调用（浏览器 + Node 通用）
 │   │   ├── narrator-browser  叙事生成、流式 JSON 提取、系统咨询、转生生成、后日谈流式、思考内容过滤
-│   │   ├── parser-client     增量图谱构建、哈希缓存、续传
+│   │   ├── parser-client     增量图谱构建、哈希缓存、续传 · 派生 entities/factions/lore/timeline
+│   │   ├── prompts/          所有 LLM prompt 模板（数据，不再硬编码在业务里）
+│   │   │   ├── world-extraction       chunk 解析 + 润色 prompt
+│   │   │   ├── dialogue-runtime       叙事运行时 + StateDelta 输出扩展
+│   │   │   ├── system-hint            @系统 OOC 提示
+│   │   │   ├── epilogue               后日谈
+│   │   │   ├── agent-persona          转生 + AgentProfile 生成
+│   │   │   ├── reflection             中途剧情回响
+│   │   │   ├── deep-interaction       角色访谈 / 世界问答 / if-else / 关系解释
+│   │   │   └── import-goal            导入目标 modifier
+│   │   ├── world_builder/    （Phase 2）增量世界图谱构建（导出在 parser-client）
+│   │   ├── agent_factory/    （Phase 3）AgentProfile 生成（启发式 + LLM 富化）
+│   │   ├── scene_engine/     （Phase 3）Scene 实体 + 状态推进
+│   │   ├── context_injector/ （Phase 4）L0-L4 五级注入 + token budget
+│   │   ├── dialogue_orchestrator/ （Phase 5）Observe → Inject → Decide → Generate → Update
+│   │   ├── state_updater/    （Phase 5）applyStateDelta：关系 / 记忆 / 冲突 / 时间线
+│   │   ├── reflection_reporter/ （Phase 6）剧情回响 + 深度交互
+│   │   ├── telemetry         （Phase 8）集中事件日志 + 环形缓冲
 │   │   ├── presets/          内置预设故事
 │   │   │   ├── index.ts        PRESETS 数组 + Preset 类型
 │   │   │   └── breaking-bad.ts 预设示例（绝命毒师）
-│   │   ├── storage           localStorage 存档/故事/配置
-│   │   └── types             核心类型
+│   │   ├── storage           localStorage / IndexedDB 存档（含 agents/scenes/messages 等新 store）
+│   │   ├── types/            模块化类型（world / agent / scene / runtime）
+│   │   └── types.ts          兼容入口，re-exports types/*
 │   └── store/             # Zustand 状态 + persist 中间件
 │       └── gameStore
 └── .github/workflows/deploy.yml
 ```
+
+### 当前架构说明
+
+每轮对话是 **1 次 LLM 调用同时扮演多个 NPC**，不是真正的多 agent 仿真：模型在同一 prompt 里输出 narration + 一个 dialogues 数组（每条带 speaker 与 content）。优点是便宜（1 turn = 1 call），代价是无法做"NPC X 知道、NPC Y 不知道"这种真正的私有状态。
+
+`dialogue_orchestrator` 模块已经把 Observe → Inject → Decide → Generate → Update 的各步拆开（responder selection、context injection、stateDelta 应用都是独立函数），未来要切到"每个在场 NPC 一次独立调用 + 一个仲裁者"的真多 agent 架构时，零件齐备。`play` 页目前仍走老的 `streamNarrationBrowser` 单调用路径。
 
 ## 架构要点
 
