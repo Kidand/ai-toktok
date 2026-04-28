@@ -75,7 +75,9 @@ const initialState: GameState = {
   currentSaveId: null,
   saves: [],
   lastStoryId: null,
-  _hydrated: false,
+  // Default true — the store never blocks UI on async IDB. See the
+  // GameState._hydrated comment in types.ts.
+  _hydrated: true,
 };
 
 /**
@@ -146,25 +148,37 @@ export const useGameStore = create<GameState & GameActions>()(
               console.warn('[gameStore] loadAllSaves failed', err);
             }
 
-            const { currentSaveId, lastStoryId } = get();
+            const { currentSaveId, lastStoryId, isPlaying, parsedStory } = get();
             try {
               if (currentSaveId) {
-                const save = saves.find(s => s.id === currentSaveId)
+                // Prefer in-memory saves first — `startGame()` writes a
+                // seed there synchronously, but its IDB write is
+                // fire-and-forget so `loadAllSaves()` may have raced
+                // ahead of it and not seen the row yet.
+                const memSaves = get().saves;
+                const save = memSaves.find(s => s.id === currentSaveId)
+                  || saves.find(s => s.id === currentSaveId)
                   || (await loadSave(currentSaveId));
                 if (save) {
-                  const story = await loadStory(save.storyId);
+                  // Don't blow away in-memory parsedStory the page already
+                  // has (setup → play handoff). Only fill if missing.
+                  const story = parsedStory && parsedStory.id === save.storyId
+                    ? parsedStory
+                    : await loadStory(save.storyId);
                   set({
                     parsedStory: story,
                     narrativeHistory: save.narrativeHistory,
                     characterInteractions: save.characterInteractions,
                     lastStoryId: save.storyId,
                   });
+                } else if (isPlaying) {
+                  // The user just startGame'd (in-memory `isPlaying = true`)
+                  // but the IDB seed write hasn't landed yet. Leave the
+                  // session alone — clearing currentSaveId now would force
+                  // /play into "请先完成设置".
                 } else {
-                  // Save vanished from IDB — but if `lastStoryId` is set,
-                  // the user might have just hard-refreshed mid-startGame
-                  // (before the first autoSave). Try recovering the story
-                  // anyway so /setup or /play can re-route them.
-                  set({ currentSaveId: null, isPlaying: false });
+                  // Truly missing & not actively playing — clean up.
+                  set({ currentSaveId: null });
                   if (lastStoryId) {
                     const story = await loadStory(lastStoryId);
                     if (story) set({ parsedStory: story });
@@ -195,8 +209,9 @@ export const useGameStore = create<GameState & GameActions>()(
           } catch (err) {
             console.error('[gameStore] init crashed', err);
           } finally {
-            // Always mark hydrated. The page-level guards already handle
-            // the case where parsedStory / playerConfig are still null.
+            // _hydrated already defaults to true so this is a no-op for
+            // gating purposes; we still set it explicitly in case some
+            // external code flipped it.
             set({ _hydrated: true });
           }
         })();

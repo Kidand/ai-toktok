@@ -230,12 +230,13 @@ export interface GameState {
   lastStoryId: string | null;
 
   /**
-   * IndexedDB 异步 hydrate 完成与否。
-   *
-   * localStorage 部分（小字段）在 store 创建时已同步就位；parsedStory /
-   * narrativeHistory / characterInteractions / saves 这几个大字段需要异步从 IDB
-   * 读出。落地 /play 或 /epilogue 时若 currentSaveId 存在但 _hydrated 仍为 false，
-   * UI 应当显示加载态，避免误判为"还没完成设置"。
+   * IndexedDB hydration progress flag. **Initialised to `true`** so the
+   * store never blocks the UI on async IDB reads — page-level guards
+   * already handle missing `parsedStory` / `playerConfig` cleanly, and
+   * a previous attempt to gate the UI on this flag deadlocked /play
+   * whenever an IDB transaction got stuck. Kept here for backwards
+   * compatibility with any external code that still references it; new
+   * code should not gate rendering on it.
    */
   _hydrated: boolean;
 }

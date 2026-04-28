@@ -22,7 +22,7 @@ export default function PlayPage() {
     addNarrativeEntries, addPlayerAction, addCharacterInteractions,
     autoSave, setIsGenerating, isGenerating,
     characterInteractions,
-    init, _hydrated, currentSaveId,
+    init,
   } = useGameStore();
 
   // Hard refresh / direct navigation to /play needs to drive the IDB hydration
@@ -135,12 +135,10 @@ export default function PlayPage() {
     }
   }, [isPlaying, narrativeHistory.length, isGenerating, generateOpening]);
 
-  // While IndexedDB is rehydrating an in-progress game, show a loader rather
-  // than the "请先完成设置" fallback — the data is on the way.
-  if (!_hydrated && currentSaveId) {
-    return <div className="min-h-screen flex items-center justify-center text-[var(--ink-muted)]">加载游戏中...</div>;
-  }
-
+  // No more "加载游戏中..." gate. Async IDB hydration runs in the
+  // background; if `parsedStory` isn't ready yet the fallback below
+  // shows a friendly empty-state with a way back, and a Zustand
+  // re-render will replace it the moment hydrate() lands.
   if (!parsedStory || !playerConfig || !isPlaying) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
