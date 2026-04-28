@@ -108,6 +108,16 @@ export type ParseProgress = {
   resumedFrom?: number;   // if resumed from cache, the chunk index we started from
   retrying?: number;      // chunk currently retrying
   characters?: number;    // running character count (for UX)
+  /**
+   * The model is currently in its reasoning / thinking phase (e.g.
+   * deepseek-v4-flash, deepseek-r1, claude with extended thinking) and
+   * `delta.content` hasn't started flowing yet. UI should show "思考中"
+   * instead of leaving the bar visually frozen.
+   */
+  thinking?: boolean;
+  /** Number of reasoning tokens seen since the chunk started. Drives a
+   *  pulsing placeholder bar so the user can tell the connection is alive. */
+  thinkingTicks?: number;
 };
 
 // Prompts live in src/lib/prompts/world-extraction.ts. They are imported above.
@@ -463,6 +473,7 @@ async function parseChunkIncremental(
   graph: Graph,
   onChunkProgress?: (fraction: number) => void,
   onRetry?: (attempt: number) => void,
+  onThinking?: (ticks: number) => void,
 ): Promise<ChunkParseResult> {
   const systemPrompt = chunkIndex === 0
     ? INITIAL_PARSE_PROMPT
@@ -472,18 +483,31 @@ async function parseChunkIncremental(
     ? `（这是第 ${chunkIndex + 1}/${total} 段）\n\n${chunk}`
     : chunk;
 
-  // Long novels (e.g. 三国演义 ~60 万字 / 26 片) routinely produce chunks with
-  // 5-10 new named characters plus long event descriptions. 4096 tokens of
-  // output truncates JSON mid-string, all 3 retries fail, and the entire parse
-  // dies. 8192 gives safe headroom for any chunk size.
-  const maxTokens = 8192;
+  // Reasoning models can burn ~30-50% of `max_tokens` on `reasoning_content`
+  // before any visible JSON appears. 8192 was tight for non-reasoning
+  // models on long novels; 12288 leaves headroom even when half the budget
+  // is eaten by the thinking pass on deepseek-v4-flash etc.
+  const maxTokens = 12288;
 
   return withRetry(async () => {
     let full = '';
     let lastReported = 0;
+    let reasoningTicks = 0;
     for await (const token of streamLLMBrowser(
       config, systemPrompt, userMessage,
-      { temperature: 0.3, maxTokens },
+      {
+        temperature: 0.3,
+        maxTokens,
+        onActivity: (kind) => {
+          if (kind === 'reasoning') {
+            reasoningTicks++;
+            // Throttle: every 8 reasoning tokens (≈ once / 0.5-1s on
+            // deepseek-v4-flash) drive a "still alive" pulse so the UI
+            // can render its 思考中 indicator.
+            if (reasoningTicks % 8 === 0) onThinking?.(reasoningTicks);
+          }
+        },
+      },
     )) {
       full += token;
       // Throttle callbacks: emit at most every 40 chars to avoid 100s of
@@ -566,6 +590,11 @@ export async function parseStoryClient(
       (attempt) => onProgress?.({
         phase: 'parse', current: i, total,
         resumedFrom, retrying: attempt, characters: graph.characters.length,
+      }),
+      (ticks) => onProgress?.({
+        phase: 'parse', current: i, total,
+        resumedFrom, characters: graph.characters.length,
+        thinking: true, thinkingTicks: ticks,
       }),
     );
 

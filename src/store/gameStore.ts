@@ -98,6 +98,16 @@ function upsertSave(saves: GameSave[], save: GameSave): GameSave[] {
  */
 let initPromise: Promise<void> | null = null;
 
+/**
+ * Hard upper bound on how long the UI is allowed to wait on IDB hydration
+ * before the page falls through to its post-hydrate fallbacks. 8s is far
+ * longer than a healthy hydrate (~50-200ms) but short enough that a
+ * locked IDB transaction (other tab holding versionchange, etc.) doesn't
+ * leave the user staring at "加载游戏中..." forever. After timeout we
+ * still mark `_hydrated: true` so the page can render its empty-state.
+ */
+const INIT_WATCHDOG_MS = 8000;
+
 export const useGameStore = create<GameState & GameActions>()(
   persist(
     (set, get) => ({
@@ -106,50 +116,94 @@ export const useGameStore = create<GameState & GameActions>()(
       init: () => {
         if (initPromise) return initPromise;
         initPromise = (async () => {
-          const config = loadLLMConfig();
-          // transient flags should never survive a reload
-          set({
-            llmConfig: config,
-            isParsing: false,
-            isGenerating: false,
-          });
-
-          // One-time migration of any legacy localStorage payloads. Idempotent
-          // — sets a marker on success and short-circuits on subsequent runs.
-          await migrateLegacyStorage();
-
-          // Async load saves index from IDB.
-          const saves = await loadAllSaves();
-          set({ saves });
-
-          // If a game was in progress, hydrate the large fields (story body +
-          // narrative history) from IDB based on currentSaveId.
-          const { currentSaveId, lastStoryId } = get();
-          if (currentSaveId) {
-            const save = saves.find(s => s.id === currentSaveId)
-              || (await loadSave(currentSaveId));
-            if (save) {
-              const story = await loadStory(save.storyId);
+          // The actual hydration work — wrapped so a slow / stuck IDB
+          // can't trap the UI in "加载游戏中..." forever, and so any
+          // single failed step (corrupt save row, missing legacy key,
+          // etc.) doesn't prevent later steps from running.
+          const hydrate = async () => {
+            try {
+              const config = loadLLMConfig();
               set({
-                parsedStory: story,
-                narrativeHistory: save.narrativeHistory,
-                characterInteractions: save.characterInteractions,
-                lastStoryId: save.storyId,
+                llmConfig: config,
+                isParsing: false,
+                isGenerating: false,
               });
-            } else {
-              // Save vanished — clear the stale pointer so /play falls through
-              // to its "请先完成设置" branch instead of looping on a missing id.
-              set({ currentSaveId: null, isPlaying: false });
+            } catch (err) {
+              console.warn('[gameStore] loadLLMConfig failed', err);
             }
-          } else if (lastStoryId) {
-            // Between 解析完成 and startGame: no save yet, but we still want
-            // /setup to rehydrate the story body after a hard refresh.
-            const story = await loadStory(lastStoryId);
-            if (story) set({ parsedStory: story });
-          }
 
-          set({ _hydrated: true });
+            try {
+              await migrateLegacyStorage();
+            } catch (err) {
+              console.warn('[gameStore] migrateLegacyStorage failed', err);
+            }
+
+            let saves: GameSave[] = [];
+            try {
+              saves = await loadAllSaves();
+              set({ saves });
+            } catch (err) {
+              console.warn('[gameStore] loadAllSaves failed', err);
+            }
+
+            const { currentSaveId, lastStoryId } = get();
+            try {
+              if (currentSaveId) {
+                const save = saves.find(s => s.id === currentSaveId)
+                  || (await loadSave(currentSaveId));
+                if (save) {
+                  const story = await loadStory(save.storyId);
+                  set({
+                    parsedStory: story,
+                    narrativeHistory: save.narrativeHistory,
+                    characterInteractions: save.characterInteractions,
+                    lastStoryId: save.storyId,
+                  });
+                } else {
+                  // Save vanished from IDB — but if `lastStoryId` is set,
+                  // the user might have just hard-refreshed mid-startGame
+                  // (before the first autoSave). Try recovering the story
+                  // anyway so /setup or /play can re-route them.
+                  set({ currentSaveId: null, isPlaying: false });
+                  if (lastStoryId) {
+                    const story = await loadStory(lastStoryId);
+                    if (story) set({ parsedStory: story });
+                  }
+                }
+              } else if (lastStoryId) {
+                const story = await loadStory(lastStoryId);
+                if (story) set({ parsedStory: story });
+              }
+            } catch (err) {
+              console.warn('[gameStore] save/story hydrate failed', err);
+            }
+          };
+
+          // Watchdog: never let the spinner outlive INIT_WATCHDOG_MS.
+          const watchdog = new Promise<void>((resolve) =>
+            setTimeout(() => {
+              console.warn(
+                `[gameStore] init watchdog tripped after ${INIT_WATCHDOG_MS}ms; `
+                + 'forcing _hydrated=true so the UI can fall through.',
+              );
+              resolve();
+            }, INIT_WATCHDOG_MS),
+          );
+
+          try {
+            await Promise.race([hydrate(), watchdog]);
+          } catch (err) {
+            console.error('[gameStore] init crashed', err);
+          } finally {
+            // Always mark hydrated. The page-level guards already handle
+            // the case where parsedStory / playerConfig are still null.
+            set({ _hydrated: true });
+          }
         })();
+        // If anything still slipped through and rejected, clear the
+        // module-scope cache so the next init() call retries from
+        // scratch instead of returning the same rejected promise.
+        initPromise.catch(() => { initPromise = null; });
         return initPromise;
       },
 
@@ -188,6 +242,30 @@ export const useGameStore = create<GameState & GameActions>()(
           characterInteractions: [],
           currentSaveId: saveId,
         });
+        // Fire an immediate autoSave so a hard-refresh of /play in the
+        // narrow window before the first turn lands has an IDB row to
+        // hydrate from. Without this, init() sees `currentSaveId` set
+        // but `loadSave(currentSaveId)` returns null, and the UI either
+        // gets stuck on "加载游戏中..." or falls through to "请先完成设置".
+        const s = get();
+        if (s.parsedStory && s.playerConfig) {
+          const seed: GameSave = {
+            id: saveId,
+            storyId: s.parsedStory.id,
+            storyTitle: s.parsedStory.title,
+            playerConfig: s.playerConfig,
+            narrativeHistory: [],
+            characterInteractions: [],
+            guardrailParams: s.guardrailParams,
+            narrativeBalance: s.narrativeBalance,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            isCompleted: false,
+          };
+          set({ saves: upsertSave(s.saves, seed) });
+          saveSave(seed).catch(err =>
+            console.warn('[storage] startGame seed save failed:', err));
+        }
       },
 
       setIsParsing: (v) => set({ isParsing: v }),

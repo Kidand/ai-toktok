@@ -53,11 +53,31 @@ export async function verifyLLMConfig(config: LLMConfig): Promise<{ ok: true } |
   }
 }
 
+/**
+ * Optional activity callback. Reasoning-capable models (DeepSeek-R1 /
+ * deepseek-v4-flash, MiniMax-M, Qwen-reasoning, …) emit thinking tokens
+ * on a separate `delta.reasoning_content` channel that we deliberately
+ * don't append to the produced buffer (it would leak into JSON parsers).
+ * But silently dropping those bytes makes the UI look frozen for 30-90s
+ * during the model's first thinking pass. `onActivity('reasoning')`
+ * fires once per reasoning token so the caller can flash a "思考中" hint.
+ *
+ * `onActivity('content')` fires per visible content token — strictly
+ * redundant with `yield`, but useful for callers that don't consume the
+ * iterator directly.
+ */
+export type LLMStreamActivity = 'reasoning' | 'content';
+export interface LLMCallOptions {
+  temperature?: number;
+  maxTokens?: number;
+  onActivity?: (kind: LLMStreamActivity) => void;
+}
+
 export async function callLLMBrowser(
   config: LLMConfig,
   systemPrompt: string,
   userMessage: string,
-  options?: { temperature?: number; maxTokens?: number }
+  options?: LLMCallOptions,
 ): Promise<string> {
   let full = '';
   for await (const token of streamLLMBrowser(config, systemPrompt, userMessage, options)) {
@@ -70,15 +90,16 @@ export async function* streamLLMBrowser(
   config: LLMConfig,
   systemPrompt: string,
   userMessage: string,
-  options?: { temperature?: number; maxTokens?: number }
+  options?: LLMCallOptions,
 ): AsyncGenerator<string> {
   const temp = options?.temperature ?? 0.7;
   const maxTokens = options?.maxTokens ?? 4096;
+  const onActivity = options?.onActivity;
 
   if (config.provider === 'openai') {
-    yield* streamOpenAI(config, systemPrompt, userMessage, temp, maxTokens);
+    yield* streamOpenAI(config, systemPrompt, userMessage, temp, maxTokens, onActivity);
   } else {
-    yield* streamAnthropic(config, systemPrompt, userMessage, temp, maxTokens);
+    yield* streamAnthropic(config, systemPrompt, userMessage, temp, maxTokens, onActivity);
   }
 }
 
@@ -88,6 +109,7 @@ async function* streamOpenAI(
   userMessage: string,
   temperature: number,
   maxTokens: number,
+  onActivity?: (kind: LLMStreamActivity) => void,
 ): AsyncGenerator<string> {
   const base = config.baseUrl?.replace(/\/+$/, '') || DEFAULT_OPENAI_BASE;
   const res = await fetch(`${base}/chat/completions`, {
@@ -115,6 +137,8 @@ async function* streamOpenAI(
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let contentSeen = false;
+  let finishReason: string | null = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -125,13 +149,44 @@ async function* streamOpenAI(
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue;
       const data = line.slice(6);
-      if (data === '[DONE]') return;
+      if (data === '[DONE]') {
+        if (!contentSeen) {
+          // Reasoning model burned the entire budget on thinking — common
+          // failure mode for deepseek-v4-flash with maxTokens too low.
+          throw new Error(
+            `LLM 返回为空（finish_reason=${finishReason || 'unknown'}）。`
+            + ' 推理模型可能把所有 token 都用在了思考阶段；尝试调高 maxTokens，'
+            + '或换非推理模型（如 deepseek-chat）。',
+          );
+        }
+        return;
+      }
       try {
         const parsed = JSON.parse(data);
-        const content = parsed.choices?.[0]?.delta?.content || '';
-        if (content) yield content;
-      } catch { /* skip */ }
+        const delta = parsed.choices?.[0]?.delta;
+        // Reasoning channel — surfaces only as a heartbeat to the caller.
+        if (delta?.reasoning_content) onActivity?.('reasoning');
+        const content = delta?.content || '';
+        if (content) {
+          contentSeen = true;
+          onActivity?.('content');
+          yield content;
+        }
+        // Capture finish_reason so the empty-response error above is precise.
+        const fr = parsed.choices?.[0]?.finish_reason;
+        if (fr) finishReason = fr;
+      } catch { /* skip non-JSON keep-alive lines */ }
     }
+  }
+  // Stream closed without a [DONE] sentinel — uncommon but possible
+  // (e.g. proxy buffering). If we never saw any content, surface the
+  // same "empty response" error as the [DONE]-without-content branch.
+  if (!contentSeen) {
+    throw new Error(
+      `LLM 返回为空（finish_reason=${finishReason || 'stream_closed'}）。`
+      + ' 推理模型可能把所有 token 都用在了思考阶段；尝试调高 maxTokens，'
+      + '或换非推理模型（如 deepseek-chat）。',
+    );
   }
 }
 
@@ -141,6 +196,7 @@ async function* streamAnthropic(
   userMessage: string,
   temperature: number,
   maxTokens: number,
+  onActivity?: (kind: LLMStreamActivity) => void,
 ): AsyncGenerator<string> {
   const base = config.baseUrl?.replace(/\/+$/, '') || DEFAULT_ANTHROPIC_BASE;
   const res = await fetch(`${base}/messages`, {
@@ -168,6 +224,8 @@ async function* streamAnthropic(
   const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
+  let contentSeen = false;
+  let stopReason: string | null = null;
 
   while (true) {
     const { done, value } = await reader.read();
@@ -180,10 +238,40 @@ async function* streamAnthropic(
       try {
         const parsed = JSON.parse(line.slice(6));
         if (parsed.type === 'content_block_delta') {
+          // Anthropic's extended-thinking blocks come on `thinking_delta`.
+          // Surface them as a heartbeat only — don't yield.
+          if (parsed.delta?.type === 'thinking_delta' || parsed.delta?.thinking) {
+            onActivity?.('reasoning');
+            continue;
+          }
           const text = parsed.delta?.text || '';
-          if (text) yield text;
+          if (text) {
+            contentSeen = true;
+            onActivity?.('content');
+            yield text;
+          }
+        } else if (parsed.type === 'message_delta') {
+          if (parsed.delta?.stop_reason) stopReason = parsed.delta.stop_reason;
+        } else if (parsed.type === 'message_stop') {
+          if (!contentSeen) {
+            throw new Error(
+              `LLM 返回为空（stop_reason=${stopReason || 'unknown'}）。`
+              + ' 模型可能把所有 token 都用在了思考阶段；尝试调高 maxTokens。',
+            );
+          }
+          return;
         }
-      } catch { /* skip */ }
+      } catch (err) {
+        // Re-throw the explicit empty-response error so callers see it.
+        if (err instanceof Error && err.message.startsWith('LLM 返回为空')) throw err;
+        // Otherwise: malformed keep-alive line, ignore.
+      }
     }
+  }
+  if (!contentSeen) {
+    throw new Error(
+      `LLM 返回为空（stop_reason=${stopReason || 'stream_closed'}）。`
+      + ' 模型可能把所有 token 都用在了思考阶段；尝试调高 maxTokens。',
+    );
   }
 }

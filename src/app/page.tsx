@@ -31,7 +31,7 @@ export default function HomePage() {
   const [storyText, setStoryText] = useState('');
   const [fileName, setFileName] = useState('');
   const [error, setError] = useState('');
-  const [parseProgress, setParseProgress] = useState<{ phase: string; current: number; total: number; resumedFrom?: number; retrying?: number; characters?: number }>({ phase: '', current: 0, total: 0 });
+  const [parseProgress, setParseProgress] = useState<{ phase: string; current: number; total: number; resumedFrom?: number; retrying?: number; characters?: number; thinking?: boolean; thinkingTicks?: number }>({ phase: '', current: 0, total: 0 });
   const [tab, setTab] = useState<'presets' | 'new' | 'saves'>('presets');
   const [showApiDetails, setShowApiDetails] = useState(false);
   const [verify, setVerify] = useState<VerifyState>({ status: 'idle' });
@@ -164,8 +164,15 @@ export default function HomePage() {
     return <div className="min-h-screen flex items-center justify-center text-[var(--ink-muted)]">加载中...</div>;
   }
 
+  // Reasoning models stall the bar for 30-90s during their thinking
+  // phase. Tick the bar forward (5% → 12%) based on reasoning count so
+  // the user can tell the connection is alive.
+  const thinkingNudge = parseProgress.thinking
+    ? Math.min(7, (parseProgress.thinkingTicks || 0) / 50)
+    : 0;
   const progressPct = parseProgress.phase === 'split' ? 3
-    : parseProgress.phase === 'parse' ? Math.max(5, (parseProgress.current / Math.max(1, parseProgress.total)) * 88)
+    : parseProgress.phase === 'parse'
+      ? Math.max(5 + thinkingNudge, (parseProgress.current / Math.max(1, parseProgress.total)) * 88)
     : parseProgress.phase === 'polish' ? 94
     : parseProgress.phase === 'build' ? 100
     : 0;
@@ -399,7 +406,12 @@ export default function HomePage() {
                 <div className="flex justify-between items-center text-xs font-mono gap-2 mb-1.5">
                   <span className="truncate text-[var(--ink)] font-bold tracking-wider">
                     {parseProgress.phase === 'split' && '▸ 切片中'}
-                    {parseProgress.phase === 'parse' && (
+                    {parseProgress.phase === 'parse' && parseProgress.thinking && (
+                      <span className="typing-cursor">
+                        ▸ 模型思考中{parseProgress.total > 1 ? ` · 第 ${Math.floor(parseProgress.current) + 1}/${parseProgress.total} 段` : ''}
+                      </span>
+                    )}
+                    {parseProgress.phase === 'parse' && !parseProgress.thinking && (
                       parseProgress.total === 1
                         ? '▸ 解析中'
                         : `▸ 第 ${parseProgress.current.toFixed(2)}/${parseProgress.total} 段`
@@ -408,6 +420,11 @@ export default function HomePage() {
                     {parseProgress.phase === 'build' && '▸ 构建世界'}
                   </span>
                   <div className="flex items-center gap-1.5 shrink-0">
+                    {parseProgress.phase === 'parse' && parseProgress.thinking && parseProgress.thinkingTicks !== undefined && (
+                      <span className="chip chip-teal">
+                        reasoning · {parseProgress.thinkingTicks}
+                      </span>
+                    )}
                     {parseProgress.phase === 'parse' && parseProgress.characters !== undefined && parseProgress.characters > 0 && (
                       <span className="chip">{parseProgress.characters} 角色</span>
                     )}
@@ -423,7 +440,13 @@ export default function HomePage() {
                 <div className="ticked-progress">
                   <div className="ticked-progress-fill" style={{ width: `${progressPct}%` }} />
                 </div>
-                {parseProgress.phase === 'parse' && parseProgress.total > 1 && (
+                {parseProgress.phase === 'parse' && parseProgress.thinking && (
+                  <p className="text-[11px] text-[var(--ink-muted)] mt-2 font-mono leading-relaxed">
+                    {'// 推理模型（如 deepseek-v4-flash）在思考阶段不输出文本，进度条会停留 30-90 秒，'}
+                    {'reasoning 计数仍在递增 = 连接是活的'}
+                  </p>
+                )}
+                {parseProgress.phase === 'parse' && !parseProgress.thinking && parseProgress.total > 1 && (
                   <p className="text-[11px] text-[var(--ink-muted)] mt-2 font-mono">
                     {'// 每段基于前序图谱增量合并 · 失败自动重试 · 成功已缓存'}
                   </p>
