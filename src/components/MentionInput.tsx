@@ -333,7 +333,10 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
           style={{
             position: 'absolute',
             bottom: `calc(100% + 6px)`,
-            left: Math.max(0, popupAnchor.left - 12),
+            // Pin to the editor's left edge regardless of where the
+            // `@` was typed — caret-anchored popups jump around when
+            // the user types mid-line, which reads as "居中" / 抖动.
+            left: 0,
             minWidth: 240,
             maxWidth: 340,
             maxHeight: 280,
