@@ -15,7 +15,7 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
-import { getDisplayCharacters } from '@/lib/cast';
+import { getDisplayCharacters, getDisplayRelationships } from '@/lib/cast';
 import { speakerColor } from '@/components/NarrativeFeed';
 import { ArrowLeft, Users, Book } from '@/components/Icons';
 import { RelationshipGraph } from '@/components/RelationshipGraph';
@@ -42,6 +42,7 @@ export default function WorldPage() {
   }
 
   const cast = getDisplayCharacters(parsedStory, playerConfig);
+  const relationships = getDisplayRelationships(parsedStory, playerConfig);
   const factions: Faction[] = parsedStory.factions || [];
   const loreEntries: LoreEntry[] = parsedStory.loreEntries
     || deriveFallbackLore(parsedStory.worldSetting.rules);
@@ -102,7 +103,7 @@ export default function WorldPage() {
           </p>
           <RelationshipGraph
             characters={cast}
-            relationships={parsedStory.relationships}
+            relationships={relationships}
           />
         </section>
 

@@ -13,7 +13,26 @@
 import type { ParsedStory } from '../types';
 
 export const REINCARNATION_SYSTEM_PROMPT = `根据以下世界观，生成一个符合背景的全新原创角色。返回严格JSON：
-{ "name": "角色名", "description": "外貌及身份简述", "personality": "性格特征", "background": "背景故事" }`;
+{
+  "name": "角色名",
+  "description": "外貌及身份简述",
+  "personality": "性格特征",
+  "background": "背景故事",
+  "relationships": [
+    {
+      "targetName": "已有角色名（必须是输入里出现过的角色名）",
+      "relation": "一句话关系描述（如：青梅竹马 / 宿敌 / 同一阵营的下属）",
+      "polarity": -1 到 1 的浮点数（-1=敌对，0=中立，1=亲密；取一位小数）,
+      "strength": 0 到 1 的浮点数（0=极淡，1=命运纠缠级；取一位小数）
+    }
+  ]
+}
+
+要求：
+- relationships 至少 2 条，最多 5 条；只能与"已有角色"列表里的角色建立关系
+- 关系要紧扣世界观和该角色的背景故事，避免空泛
+- 不要与所有角色都建立关系——选与背景最契合的几位即可
+- 不输出 JSON 以外的任何文字`;
 
 export function buildReincarnationUserMessage(story: ParsedStory): string {
   return `世界：${story.title}\n时代：${story.worldSetting.era}\n类型：${story.worldSetting.genre}\n设定：${story.worldSetting.rules.join('；')}\n已有角色：${story.characters.map(c => c.name).join('、')}`;

@@ -10,13 +10,16 @@ import { ArrowLeft, Search } from '@/components/Icons';
 
 export default function CharactersPage() {
   const router = useRouter();
-  const { parsedStory, playerConfig } = useGameStore();
+  const { parsedStory, playerConfig, init } = useGameStore();
   const [selected, setSelected] = useState<Character | null>(null);
   const [filter, setFilter] = useState('');
   const [mounted, setMounted] = useState(false);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setMounted(true); }, []);
+  // Hard-refresh on /characters needs its own IDB hydration; otherwise
+  // parsedStory stays null forever and we'd show "请先上传故事".
+  useEffect(() => { init(); }, [init]);
 
   // Hooks must run on every render — keep them above any early-return.
   // `getDisplayCharacters` defends against null parsedStory itself.

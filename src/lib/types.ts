@@ -41,7 +41,13 @@ export interface Character {
   description: string;
   personality: string;
   background: string;
-  relationships: { characterId: string; relation: string }[];
+  /**
+   * Legacy embedded relationship list. `polarity`/`strength` are optional
+   * extensions populated when we have richer data (e.g. the reincarnation
+   * generator's per-relationship metadata) so the relationship graph can
+   * colour edges without round-tripping through the Phase 2 table.
+   */
+  relationships: { characterId: string; relation: string; polarity?: number; strength?: number }[];
   isOriginal: boolean; // 是否为原作角色
 }
 

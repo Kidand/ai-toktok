@@ -148,7 +148,7 @@ export const useGameStore = create<GameState & GameActions>()(
               console.warn('[gameStore] loadAllSaves failed', err);
             }
 
-            const { currentSaveId, lastStoryId, isPlaying, parsedStory } = get();
+            const { currentSaveId, lastStoryId, isPlaying } = get();
             try {
               if (currentSaveId) {
                 // Prefer in-memory saves first — `startGame()` writes a
@@ -160,33 +160,60 @@ export const useGameStore = create<GameState & GameActions>()(
                   || saves.find(s => s.id === currentSaveId)
                   || (await loadSave(currentSaveId));
                 if (save) {
-                  // Don't blow away in-memory parsedStory the page already
-                  // has (setup → play handoff). Only fill if missing.
-                  const story = parsedStory && parsedStory.id === save.storyId
-                    ? parsedStory
-                    : await loadStory(save.storyId);
-                  set({
-                    parsedStory: story,
-                    narrativeHistory: save.narrativeHistory,
-                    characterInteractions: save.characterInteractions,
-                    lastStoryId: save.storyId,
-                  });
+                  // After every await, re-read parsedStory from the store —
+                  // the user may have picked a fresh preset on the home page
+                  // mid-init (`setParsedStory` runs synchronously, this code
+                  // sits behind awaits). Stomping their choice with stale
+                  // IDB data is what produced the "请先上传故事" report.
+                  const cur1 = get().parsedStory;
+                  if (cur1 && cur1.id !== save.storyId) {
+                    // User picked a different story; don't hydrate this save.
+                  } else {
+                    const story = cur1 && cur1.id === save.storyId
+                      ? cur1
+                      : await loadStory(save.storyId);
+                    const cur2 = get().parsedStory;
+                    if (cur2 && cur2.id !== save.storyId) {
+                      // Same race, second checkpoint.
+                    } else if (!story) {
+                      // Save row exists but its story body is missing in IDB.
+                      // Don't null out parsedStory — keep whatever's in memory
+                      // and just hydrate the save's narrative state.
+                      if (cur2) {
+                        set({
+                          narrativeHistory: save.narrativeHistory,
+                          characterInteractions: save.characterInteractions,
+                          lastStoryId: save.storyId,
+                        });
+                      }
+                    } else {
+                      set({
+                        parsedStory: story,
+                        narrativeHistory: save.narrativeHistory,
+                        characterInteractions: save.characterInteractions,
+                        lastStoryId: save.storyId,
+                      });
+                    }
+                  }
                 } else if (isPlaying) {
                   // The user just startGame'd (in-memory `isPlaying = true`)
                   // but the IDB seed write hasn't landed yet. Leave the
                   // session alone — clearing currentSaveId now would force
                   // /play into "请先完成设置".
                 } else {
-                  // Truly missing & not actively playing — clean up.
-                  set({ currentSaveId: null });
-                  if (lastStoryId) {
+                  // Truly missing & not actively playing — clean up. Only
+                  // touch parsedStory if the user hasn't picked one mid-init.
+                  if (get().currentSaveId === currentSaveId) {
+                    set({ currentSaveId: null });
+                  }
+                  if (lastStoryId && !get().parsedStory) {
                     const story = await loadStory(lastStoryId);
-                    if (story) set({ parsedStory: story });
+                    if (story && !get().parsedStory) set({ parsedStory: story });
                   }
                 }
-              } else if (lastStoryId) {
+              } else if (lastStoryId && !get().parsedStory) {
                 const story = await loadStory(lastStoryId);
-                if (story) set({ parsedStory: story });
+                if (story && !get().parsedStory) set({ parsedStory: story });
               }
             } catch (err) {
               console.warn('[gameStore] save/story hydrate failed', err);

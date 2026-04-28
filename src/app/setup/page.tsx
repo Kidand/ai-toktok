@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { EntryMode, Character } from '@/lib/types';
@@ -14,8 +14,13 @@ export default function SetupPage() {
   const {
     parsedStory, llmConfig, setPlayerConfig, setGuardrailParams,
     setNarrativeBalance, startGame,
-    guardrailParams, narrativeBalance,
+    guardrailParams, narrativeBalance, init,
   } = useGameStore();
+
+  // Hard-refresh on /setup needs to drive its own IDB hydration —
+  // the home page may never have run. Without this, parsedStory stays
+  // null forever and we'd flash "请先上传故事" instead of recovering.
+  useEffect(() => { init(); }, [init]);
 
   const [entryMode, setEntryMode] = useState<EntryMode>('soul-transfer');
   const [selectedCharId, setSelectedCharId] = useState('');
@@ -42,13 +47,36 @@ export default function SetupPage() {
     setIsGenerating(true);
     try {
       const data = await generateReincarnationBrowser(llmConfig, parsedStory);
+      // Map LLM-emitted target names back to canonical character ids so the
+      // relationships are renderable by /characters and the relation graph.
+      // The legacy embedding (`Character.relationships`) only carries the
+      // label; polarity/strength are surfaced via the synthesized Phase 2
+      // table that getReincarnationRelationships() derives at render time.
+      const rawRels: Array<{ targetName?: string; relation?: string; polarity?: number; strength?: number }>
+        = Array.isArray(data.relationships) ? data.relationships : [];
+      const relationships = rawRels
+        .map(r => {
+          const target = parsedStory.characters.find(c =>
+            c.name === r.targetName
+            || (r.targetName && c.name.includes(r.targetName))
+            || (r.targetName && r.targetName.includes(c.name))
+          );
+          if (!target || !r.relation) return null;
+          return {
+            characterId: target.id,
+            relation: r.relation,
+            polarity: typeof r.polarity === 'number' ? r.polarity : undefined,
+            strength: typeof r.strength === 'number' ? r.strength : undefined,
+          };
+        })
+        .filter((r): r is NonNullable<typeof r> => r !== null);
       setReincarnation({
         id: uuid(),
         name: data.name,
         description: data.description,
         personality: data.personality,
         background: data.background,
-        relationships: [],
+        relationships,
         isOriginal: false,
       });
     } catch (err) {
