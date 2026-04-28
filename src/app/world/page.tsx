@@ -146,7 +146,7 @@ export default function WorldPage() {
         {timeline.length > 0 && (
           <section>
             <SectionHead n="05" title="时间线" />
-            <ol className="space-y-3">
+            <ol className="list-none space-y-3 pl-0">
               {timeline.map(e => (
                 <li key={e.id} className="surface p-4">
                   <div className="flex items-baseline gap-2 mb-1">

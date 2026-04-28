@@ -126,6 +126,16 @@
 
 html, body { height: 100%; }
 
+/* Neo-brutalist lists rely on borders / stamps / chips for structure,
+ * never on disc / decimal markers. Reset so the markers don't leak
+ * through Tailwind v4 preflight in environments that ship them. Use
+ * an explicit `list-disc` utility on a list when you do want them. */
+ul, ol {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
 body {
   background:
     /* Subtle dotted grid for that paper-print feel */

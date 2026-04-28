@@ -165,9 +165,10 @@ function EpilogueContent() {
 
         {/* memoirs 区段标题 —— 在 arc 显示完后再出现 */}
         {(isGenerating && streamState?.phase === 'memoirs') || hasEpilogue ? (
-          <h3 className="chapter-head mb-4">
-            <span className="ordinal">∾</span> · 主要角色的回忆
-          </h3>
+          <div className="flex items-center gap-3 mb-5 flex-wrap">
+            <span className="stamp" style={{ transform: 'rotate(-1.5deg)' }}>MEMOIRS</span>
+            <h3 className="display text-2xl">主要角色的回忆</h3>
+          </div>
         ) : null}
 
         {/* 流式中的卡片 */}
@@ -333,7 +334,7 @@ function ArcSummaryCard({ arc }: { arc: StoryArcReport }) {
       </header>
 
       {phases.length > 0 ? (
-        <ol className="space-y-3 mb-5">
+        <ol className="list-none space-y-3 mb-5 pl-0">
           {phases.map((p, i) => (
             <li key={i} className="flex gap-3">
               <span className="font-mono font-bold text-sm bg-[var(--ink)] text-[var(--paper)] px-2 py-1 shrink-0 rounded-[3px] h-fit">

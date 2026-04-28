@@ -509,9 +509,12 @@ export default function PlayPage() {
              onClick={() => setReflection(null)}>
           <div className="surface-raised max-w-lg w-full p-5 max-h-[85vh] overflow-y-auto"
                onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-3">
-              <span className="chapter-head"><span className="ordinal">∞</span> · 剧情回响</span>
-              <button onClick={() => setReflection(null)} className="btn btn-ghost btn-sm" aria-label="关闭">
+            <div className="flex items-start justify-between mb-3 gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="stamp" style={{ transform: 'rotate(-1.5deg)' }}>REFLECTION</span>
+                <h3 className="display text-xl">剧情回响</h3>
+              </div>
+              <button onClick={() => setReflection(null)} className="btn btn-ghost btn-sm shrink-0" aria-label="关闭">
                 <Close />
               </button>
             </div>
@@ -543,8 +546,10 @@ export default function PlayPage() {
                 {reflection.data.branchHints.length > 0 && (
                   <div>
                     <div className="label-mono text-[10px] mb-1.5">线索方向</div>
-                    <ul className="space-y-1 font-serif text-sm list-disc list-inside">
-                      {reflection.data.branchHints.map((h, i) => <li key={i}>{h}</li>)}
+                    <ul className="space-y-1.5 font-serif text-sm">
+                      {reflection.data.branchHints.map((h, i) => (
+                        <li key={i} className="pl-2 border-l-2 border-[var(--ink)]">{h}</li>
+                      ))}
                     </ul>
                   </div>
                 )}
@@ -574,9 +579,12 @@ export default function PlayPage() {
           <div className="surface-raised w-full sm:max-w-lg p-5 sm:rounded-none flex flex-col"
                style={{ maxHeight: '85vh' }}
                onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-3 shrink-0">
-              <span className="chapter-head"><span className="ordinal">?</span> · 深问 {interview.characterName}</span>
-              <button onClick={() => setInterview(null)} className="btn btn-ghost btn-sm" aria-label="关闭">
+            <div className="flex items-start justify-between mb-3 shrink-0 gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
+                <span className="stamp" style={{ transform: 'rotate(-1.5deg)' }}>INTERVIEW</span>
+                <h3 className="display text-xl">深问 {interview.characterName}</h3>
+              </div>
+              <button onClick={() => setInterview(null)} className="btn btn-ghost btn-sm shrink-0" aria-label="关闭">
                 <Close />
               </button>
             </div>
