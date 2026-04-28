@@ -67,10 +67,23 @@ export async function verifyLLMConfig(config: LLMConfig): Promise<{ ok: true } |
  * iterator directly.
  */
 export type LLMStreamActivity = 'reasoning' | 'content';
+
+/**
+ * Prior turns for multi-turn chat. Inserted between the system prompt
+ * and the new user message; preserves the chronological order. Use this
+ * when implementing follow-up dialogue (e.g. agent interview where the
+ * NPC must remember what was just said).
+ */
+export interface PriorMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface LLMCallOptions {
   temperature?: number;
   maxTokens?: number;
   onActivity?: (kind: LLMStreamActivity) => void;
+  priorMessages?: PriorMessage[];
 }
 
 export async function callLLMBrowser(
@@ -96,10 +109,11 @@ export async function* streamLLMBrowser(
   const maxTokens = options?.maxTokens ?? 4096;
   const onActivity = options?.onActivity;
 
+  const priorMessages = options?.priorMessages;
   if (config.provider === 'openai') {
-    yield* streamOpenAI(config, systemPrompt, userMessage, temp, maxTokens, onActivity);
+    yield* streamOpenAI(config, systemPrompt, userMessage, temp, maxTokens, onActivity, priorMessages);
   } else {
-    yield* streamAnthropic(config, systemPrompt, userMessage, temp, maxTokens, onActivity);
+    yield* streamAnthropic(config, systemPrompt, userMessage, temp, maxTokens, onActivity, priorMessages);
   }
 }
 
@@ -110,8 +124,14 @@ async function* streamOpenAI(
   temperature: number,
   maxTokens: number,
   onActivity?: (kind: LLMStreamActivity) => void,
+  priorMessages?: PriorMessage[],
 ): AsyncGenerator<string> {
   const base = config.baseUrl?.replace(/\/+$/, '') || DEFAULT_OPENAI_BASE;
+  const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
+    { role: 'system', content: systemPrompt },
+    ...(priorMessages || []),
+    { role: 'user', content: userMessage },
+  ];
   const res = await fetch(`${base}/chat/completions`, {
     method: 'POST',
     headers: {
@@ -120,10 +140,7 @@ async function* streamOpenAI(
     },
     body: JSON.stringify({
       model: config.model || 'gpt-4o',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userMessage },
-      ],
+      messages,
       temperature,
       max_tokens: maxTokens,
       stream: true,
@@ -197,8 +214,13 @@ async function* streamAnthropic(
   temperature: number,
   maxTokens: number,
   onActivity?: (kind: LLMStreamActivity) => void,
+  priorMessages?: PriorMessage[],
 ): AsyncGenerator<string> {
   const base = config.baseUrl?.replace(/\/+$/, '') || DEFAULT_ANTHROPIC_BASE;
+  const messages: { role: 'user' | 'assistant'; content: string }[] = [
+    ...(priorMessages || []),
+    { role: 'user', content: userMessage },
+  ];
   const res = await fetch(`${base}/messages`, {
     method: 'POST',
     headers: {
@@ -210,7 +232,7 @@ async function* streamAnthropic(
     body: JSON.stringify({
       model: config.model || 'claude-sonnet-4-20250514',
       system: systemPrompt,
-      messages: [{ role: 'user', content: userMessage }],
+      messages,
       temperature,
       max_tokens: maxTokens,
       stream: true,

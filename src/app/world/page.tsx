@@ -15,6 +15,7 @@
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
+import { getDisplayCharacters } from '@/lib/cast';
 import { speakerColor } from '@/components/NarrativeFeed';
 import { ArrowLeft, Users, Book } from '@/components/Icons';
 import { RelationshipGraph } from '@/components/RelationshipGraph';
@@ -22,7 +23,7 @@ import type { Faction, LoreEntry, TimelineEvent } from '@/lib/types';
 
 export default function WorldPage() {
   const router = useRouter();
-  const { parsedStory, init, _hydrated } = useGameStore();
+  const { parsedStory, playerConfig, init, _hydrated } = useGameStore();
 
   useEffect(() => { init(); }, [init]);
 
@@ -40,6 +41,7 @@ export default function WorldPage() {
     );
   }
 
+  const cast = getDisplayCharacters(parsedStory, playerConfig);
   const factions: Faction[] = parsedStory.factions || [];
   const loreEntries: LoreEntry[] = parsedStory.loreEntries
     || deriveFallbackLore(parsedStory.worldSetting.rules);
@@ -68,7 +70,7 @@ export default function WorldPage() {
           <div className="flex items-center gap-2 flex-wrap">
             <span className="chip">{parsedStory.worldSetting.era}</span>
             <span className="chip">{parsedStory.worldSetting.genre}</span>
-            <span className="chip">{parsedStory.characters.length} 角色</span>
+            <span className="chip">{cast.length} 角色</span>
             <span className="chip">{parsedStory.locations.length} 地点</span>
             {factions.length > 0 && <span className="chip chip-mint">{factions.length} 阵营</span>}
             {loreEntries.length > 0 && <span className="chip">{loreEntries.length} 设定</span>}
@@ -79,7 +81,7 @@ export default function WorldPage() {
         <section>
           <SectionHead n="01" title="登场角色" />
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {parsedStory.characters.map(c => (
+            {cast.map(c => (
               <div key={c.id} className="surface p-4 flex gap-3">
                 <div className="avatar avatar-md" data-speaker-color={speakerColor(c.name)}>{c.name[0]}</div>
                 <div className="min-w-0">
@@ -99,7 +101,7 @@ export default function WorldPage() {
             {'// 节点 = 角色（首字母+稳定色）；线 = 关系；颜色映射倾向（亲近/中立/敌对），粗细 = 强度'}
           </p>
           <RelationshipGraph
-            characters={parsedStory.characters}
+            characters={cast}
             relationships={parsedStory.relationships}
           />
         </section>

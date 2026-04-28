@@ -7,6 +7,7 @@ import { streamNarrationBrowser, parseNarrationResponse, systemHintBrowser, type
 import { generateSceneReflection, type SceneReflection } from '@/lib/reflection_reporter';
 import { agentInterview } from '@/lib/reflection_reporter/deep-interaction';
 import { agentProfileFromCharacter } from '@/lib/agent_factory';
+import { getDisplayCharacters } from '@/lib/cast';
 import { NarrativeFeed, speakerColor } from '@/components/NarrativeFeed';
 import { MentionInput, MentionInputHandle, MentionCandidate, MentionParsed } from '@/components/MentionInput';
 import { ArrowLeft, Users, Send, Close, Sparkles, Globe } from '@/components/Icons';
@@ -35,7 +36,20 @@ export default function PlayPage() {
   const [endConfirm, setEndConfirm] = useState(false);
   const [systemHint, setSystemHint] = useState<{ question: string; answer: string; loading: boolean } | null>(null);
   const [reflection, setReflection] = useState<{ loading: boolean; data: SceneReflection | null; error?: string } | null>(null);
-  const [interview, setInterview] = useState<{ characterId: string; characterName: string; question: string; answer: string; loading: boolean } | null>(null);
+  /**
+   * Multi-turn interview state. `turns` is the running transcript of
+   * completed Q/A pairs — passed back to `agentInterview` as `priorTurns`
+   * on every subsequent question so the NPC remembers context. The
+   * tail-most pending question (if any) lives in `pending`.
+   */
+  const [interview, setInterview] = useState<{
+    characterId: string;
+    characterName: string;
+    turns: { question: string; answer: string }[];
+    pending?: { question: string };
+    loading: boolean;
+    error?: string;
+  } | null>(null);
   const [interviewDraft, setInterviewDraft] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<MentionInputHandle>(null);
@@ -46,12 +60,18 @@ export default function PlayPage() {
     }
   }, [narrativeHistory, streamingState, systemHint]);
 
+  /** Full cast = preset characters + reincarnated player (if any). */
+  const cast = useMemo(
+    () => parsedStory ? getDisplayCharacters(parsedStory, playerConfig) : [],
+    [parsedStory, playerConfig],
+  );
+
   const playerChar = useMemo(() => {
     if (!parsedStory || !playerConfig) return undefined;
     return playerConfig.entryMode === 'soul-transfer'
-      ? parsedStory.characters.find(c => c.id === playerConfig.characterId)
+      ? cast.find(c => c.id === playerConfig.characterId)
       : playerConfig.customCharacter;
-  }, [parsedStory, playerConfig]);
+  }, [parsedStory, playerConfig, cast]);
 
   /** Characters that have appeared in the last PRESENCE_WINDOW entries. */
   const presentNames = useMemo(() => {
@@ -61,12 +81,12 @@ export default function PlayPage() {
     for (const entry of recent) {
       if (entry.type === 'dialogue' && entry.speaker) present.add(entry.speaker);
       const content = entry.content || '';
-      for (const c of parsedStory.characters) {
+      for (const c of cast) {
         if (c.name && content.includes(c.name)) present.add(c.name);
       }
     }
     return present;
-  }, [narrativeHistory, parsedStory]);
+  }, [narrativeHistory, parsedStory, cast]);
 
   /** Mention candidates: System → interactable → non-interactable. Excludes player char. */
   const mentionCandidates: MentionCandidate[] = useMemo(() => {
@@ -77,7 +97,7 @@ export default function PlayPage() {
     };
     const interactable: MentionCandidate[] = [];
     const inactive: MentionCandidate[] = [];
-    for (const c of parsedStory.characters) {
+    for (const c of cast) {
       if (playerChar && c.id === playerChar.id) continue;
       const cand: MentionCandidate = {
         id: c.id, name: c.name, kind: 'character',
@@ -87,7 +107,7 @@ export default function PlayPage() {
       (cand.interactable ? interactable : inactive).push(cand);
     }
     return [system, ...interactable, ...inactive];
-  }, [parsedStory, playerChar, presentNames]);
+  }, [parsedStory, playerChar, presentNames, cast]);
 
   const streamNarrate = useCallback(async (
     action: string,
@@ -210,11 +230,23 @@ export default function PlayPage() {
 
   const handleInterview = async (characterId: string, question: string) => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
-    const character = parsedStory.characters.find(c => c.id === characterId);
+    const character = cast.find(c => c.id === characterId);
     if (!character) return;
     const trimmed = question.trim();
     if (!trimmed) return;
-    setInterview({ characterId, characterName: character.name, question: trimmed, answer: '', loading: true });
+    // Snapshot the existing transcript before this turn — passed to
+    // `agentInterview` as priorTurns so the NPC sees the full thread.
+    const existingTurns = (interview?.characterId === characterId)
+      ? interview.turns
+      : [];
+    // Optimistically push the pending question into UI state.
+    setInterview({
+      characterId,
+      characterName: character.name,
+      turns: existingTurns,
+      pending: { question: trimmed },
+      loading: true,
+    });
     try {
       const projectId = parsedStory.project?.id || parsedStory.id;
       const profile = parsedStory.agents?.find(a => a.entityId === character.id)
@@ -226,13 +258,22 @@ export default function PlayPage() {
         history: narrativeHistory,
         agent: profile,
         question: trimmed,
+        priorTurns: existingTurns,
       });
-      setInterview({ characterId, characterName: character.name, question: trimmed, answer, loading: false });
+      setInterview({
+        characterId,
+        characterName: character.name,
+        turns: [...existingTurns, { question: trimmed, answer }],
+        loading: false,
+      });
     } catch (err) {
       setInterview({
-        characterId, characterName: character.name, question: trimmed,
-        answer: err instanceof Error ? err.message : '访谈失败',
+        characterId,
+        characterName: character.name,
+        turns: existingTurns,
+        pending: { question: trimmed },
         loading: false,
+        error: err instanceof Error ? err.message : '访谈失败',
       });
     }
   };
@@ -385,14 +426,14 @@ export default function PlayPage() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-3 space-y-2.5">
-              {parsedStory.characters.map(char => {
+              {cast.map(char => {
                 const interaction = characterInteractions.find(ci => ci.characterId === char.id);
                 const isPlayer = char.id === playerConfig.characterId;
                 const isPresent = presentNames.has(char.name);
                 const isExpanded = expandedCharId === char.id;
                 const relationships = char.relationships
                   .map(r => {
-                    const target = parsedStory.characters.find(c => c.id === r.characterId);
+                    const target = cast.find(c => c.id === r.characterId);
                     return target ? { name: target.name, relation: r.relation } : null;
                   })
                   .filter((r): r is { name: string; relation: string } => r !== null);
@@ -440,8 +481,7 @@ export default function PlayPage() {
                                 setInterview({
                                   characterId: char.id,
                                   characterName: char.name,
-                                  question: '',
-                                  answer: '',
+                                  turns: [],
                                   loading: false,
                                 });
                                 setShowSidebar(false);
@@ -589,15 +629,27 @@ export default function PlayPage() {
               </button>
             </div>
             <p className="text-[10px] text-[var(--ink-muted)] font-mono mb-3 shrink-0">
-              {'// 访谈不计入剧情、不影响关系；按 Enter 提交，Shift+Enter 换行'}
+              {`// 多轮访谈 · ${interview.characterName}会记住上文 · 不计入剧情 · Enter 提交，Shift+Enter 换行`}
             </p>
 
-            {/* 历史问答 (只显示当前这轮) */}
+            {/* 完整对话历史 + 当前 pending 一问 */}
             <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-              {interview.question && (
+              {interview.turns.map((t, i) => (
+                <div key={i} className="space-y-2">
+                  <div className="surface p-3 bg-[var(--paper-softsink)]">
+                    <div className="label-mono text-[10px] mb-1">YOU</div>
+                    <p className="font-serif text-sm whitespace-pre-wrap">{t.question}</p>
+                  </div>
+                  <div className="surface p-3">
+                    <div className="label-mono text-[10px] mb-1">{interview.characterName.toUpperCase()}</div>
+                    <p className="font-serif text-sm leading-relaxed whitespace-pre-wrap">{t.answer}</p>
+                  </div>
+                </div>
+              ))}
+              {interview.pending && (
                 <div className="surface p-3 bg-[var(--paper-softsink)]">
                   <div className="label-mono text-[10px] mb-1">YOU</div>
-                  <p className="font-serif text-sm">{interview.question}</p>
+                  <p className="font-serif text-sm whitespace-pre-wrap">{interview.pending.question}</p>
                 </div>
               )}
               {interview.loading && (
@@ -606,10 +658,10 @@ export default function PlayPage() {
                   <p className="font-mono text-sm text-[var(--ink-muted)] typing-cursor">▸ 思考中</p>
                 </div>
               )}
-              {!interview.loading && interview.answer && (
-                <div className="surface p-3">
-                  <div className="label-mono text-[10px] mb-1">{interview.characterName.toUpperCase()}</div>
-                  <p className="font-serif text-sm leading-relaxed whitespace-pre-wrap">{interview.answer}</p>
+              {interview.error && !interview.loading && (
+                <div className="surface p-3" style={{ boxShadow: '3px 3px 0 var(--hi-coral)' }}>
+                  <div className="label-mono text-[10px] mb-1 text-[var(--hi-coral)]">FAILED</div>
+                  <p className="font-mono text-xs">{interview.error}</p>
                 </div>
               )}
             </div>

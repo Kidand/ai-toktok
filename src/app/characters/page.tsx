@@ -1,21 +1,29 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { Character } from '@/lib/types';
+import { getDisplayCharacters } from '@/lib/cast';
 import { speakerColor } from '@/components/NarrativeFeed';
 import { ArrowLeft, Search } from '@/components/Icons';
 
 export default function CharactersPage() {
   const router = useRouter();
-  const { parsedStory } = useGameStore();
+  const { parsedStory, playerConfig } = useGameStore();
   const [selected, setSelected] = useState<Character | null>(null);
   const [filter, setFilter] = useState('');
   const [mounted, setMounted] = useState(false);
 
   // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { setMounted(true); }, []);
+
+  // Hooks must run on every render — keep them above any early-return.
+  // `getDisplayCharacters` defends against null parsedStory itself.
+  const allCharacters = useMemo(
+    () => parsedStory ? getDisplayCharacters(parsedStory, playerConfig) : [],
+    [parsedStory, playerConfig],
+  );
 
   if (!mounted) {
     return <div className="min-h-screen flex items-center justify-center text-[var(--ink-muted)] font-mono">加载中...</div>;
@@ -32,12 +40,12 @@ export default function CharactersPage() {
     );
   }
 
-  const characters = parsedStory.characters.filter(c =>
+  const characters = allCharacters.filter(c =>
     !filter || c.name.includes(filter) || c.description.includes(filter)
   );
 
   const getRelationName = (charId: string) =>
-    parsedStory.characters.find(c => c.id === charId)?.name || '未知';
+    allCharacters.find(c => c.id === charId)?.name || '未知';
 
   const showDetailMobile = !!selected;
 
@@ -126,7 +134,7 @@ export default function CharactersPage() {
                       return (
                         <button key={idx}
                                 onClick={() => {
-                                  const target = parsedStory.characters.find(c => c.id === rel.characterId);
+                                  const target = allCharacters.find(c => c.id === rel.characterId);
                                   if (target) setSelected(target);
                                 }}
                                 className="choice-card flex items-center gap-3 text-left">

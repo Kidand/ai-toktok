@@ -22,7 +22,14 @@ import type {
   StateDelta,
 } from '../types';
 
-/** Ask a single agent how they feel / what they think. */
+/**
+ * Ask a single agent how they feel / what they think.
+ *
+ * When `priorTurns` is non-empty the call becomes multi-turn — earlier
+ * Q/A pairs are sent as alternating user/assistant messages so the NPC
+ * remembers what was said. Pass an empty array (or omit) for the first
+ * question of an interview.
+ */
 export async function agentInterview(args: {
   config: LLMConfig;
   story: ParsedStory;
@@ -30,16 +37,29 @@ export async function agentInterview(args: {
   history: NarrativeEntry[];
   agent: AgentProfile;
   question: string;
+  priorTurns?: { question: string; answer: string }[];
 }): Promise<string> {
   const ctx = buildDeepInteractionContext({
     story: args.story, playerConfig: args.playerConfig,
     history: args.history, agent: args.agent,
   });
   const sys = AGENT_INTERVIEW_SYSTEM(args.agent.name) + '\n\n' + ctx;
+  // Flatten previous Q/A into the alternating user/assistant shape
+  // OpenAI-compat and Anthropic both expect.
+  const priorMessages = (args.priorTurns || []).flatMap(t => [
+    { role: 'user' as const, content: t.question },
+    { role: 'assistant' as const, content: t.answer },
+  ]);
   const raw = await callLLMBrowser(args.config, sys, args.question, {
-    temperature: 0.7, maxTokens: 600,
+    temperature: 0.7,
+    maxTokens: 600,
+    priorMessages,
   });
-  logEvent('deep.interaction', { kind: 'agentInterview', agent: args.agent.name });
+  logEvent('deep.interaction', {
+    kind: 'agentInterview',
+    agent: args.agent.name,
+    turn: (args.priorTurns?.length || 0) + 1,
+  });
   return stripThinking(raw).trim();
 }
 
