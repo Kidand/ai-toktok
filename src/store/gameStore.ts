@@ -429,6 +429,8 @@ export const useGameStore = create<GameState & GameActions>()(
       }),
     }),
     {
+      // Keeps the legacy `ai-toktok-*` key name intentionally — see storage.ts.
+      // Renaming would invalidate every existing user's persisted runtime state.
       name: 'ai-toktok-runtime',
       storage: createJSONStorage(() => localStorage),
       /**

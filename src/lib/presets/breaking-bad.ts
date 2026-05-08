@@ -3,7 +3,7 @@ import { ParsedStory } from '../types';
 /**
  * 预设故事：绝命毒师 (Breaking Bad 的中文缩写讲述)
  *
- * 文本来自 story.txt，已按 AI TokTok 的解析流水线（parser-client.ts 的
+ * 文本来自 story.txt，已按 In The Book 的解析流水线（parser-client.ts 的
  * 提示词约定）提取为图谱。作为预设故事内置于应用。
  */
 export const breakingBadStory: ParsedStory = {

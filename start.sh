@@ -1,5 +1,5 @@
 #!/bin/bash
-# AI TokTok - 本地一键启动
+# In The Book - 本地一键启动
 
 set -e
 cd "$(dirname "$0")"
@@ -13,7 +13,7 @@ fi
 
 echo ""
 echo "  ╔══════════════════════════════════════╗"
-echo "  ║     AI TokTok - 沉浸式叙事沙盒       ║"
+echo "  ║   In The Book - 沉浸式叙事沙盒       ║"
 echo "  ╚══════════════════════════════════════╝"
 echo ""
 echo "  http://localhost:$PORT"

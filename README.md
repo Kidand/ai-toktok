@@ -1,4 +1,4 @@
-# AI TokTok
+# In The Book
 
 沉浸式 IP 互动叙事沙盒。上传一段故事文本（或直接选一个预设），AI 会把它解析成可探索的世界（角色、地点、时间线），你选择"魂穿"已有角色或让 AI 生成一个转生身份介入其中，与世界实时交互并产生你独有的分支剧情。故事结束后，每个与你交集过的角色会以自己的语气写下对你的回忆。
 
@@ -273,7 +273,7 @@ LLM 在 `updatedCharacters` 补充已知角色新信息、在 `newCharacters` �
 `NarrativeFeed.tsx` 的 `speakerColor(name)` 对每个非玩家角色做名字哈希，映射到固定 7 色（珊瑚/青/薄荷/紫丁香/橙/粉/天蓝，黄色保留给 CTA 和玩家）。同一角色整场游玩保持同一颜色，读者自然建立"林宇 = 珊瑚色"的视觉锚点。
 
 ### Zustand 运行时持久化
-`gameStore` 用 `persist` 中间件把运行时状态（parsedStory / playerConfig / narrativeHistory / characterInteractions / currentSaveId / isPlaying / 护栏参数）落到 `localStorage` key `ai-toktok-runtime`。
+`gameStore` 用 `persist` 中间件把运行时状态（parsedStory / playerConfig / narrativeHistory / characterInteractions / currentSaveId / isPlaying / 护栏参数）落到 `localStorage` key `ai-toktok-runtime`（保留旧 key 名以维持已有用户的存档连续性）。
 
 排除项：
 - `llmConfig` / `saves` — 另有独立 storage key，避免重复
@@ -297,7 +297,7 @@ LLM 在 `updatedCharacters` 补充已知角色新信息、在 `newCharacters` �
 
 - Workflow: `.github/workflows/deploy.yml`
 - 发布地址: `https://<user>.github.io/ai-toktok/`
-- `next.config.ts` 在 `GITHUB_ACTIONS=true` 环境下自动加 `/ai-toktok` 的 `basePath`，本地开发不受影响
+- `next.config.ts` 在 `GITHUB_ACTIONS=true` 环境下自动加 `/ai-toktok` 的 `basePath`，本地开发不受影响（应用品牌改为 "In The Book" 后 GitHub repo 仍叫 `ai-toktok`，basePath 跟随 repo 名）
 
 ## 浏览器兼容性
 

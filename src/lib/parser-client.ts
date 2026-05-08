@@ -32,6 +32,8 @@ const MAX_RETRIES = 3;
 // not resumed against a new schema. v5 added factions / loreEntries /
 // conflicts / event causes & consequences (Phase 2).
 const PROMPT_VERSION = '5';
+// Legacy `ai-toktok-*` IDB names retained on purpose — see storage.ts. Renaming
+// would orphan every cached parser snapshot and force users to re-parse stories.
 const CACHE_PREFIX = 'ai-toktok-graph-cache:';
 const CACHE_DB = 'ai-toktok';
 const CACHE_STORE = 'graphCache';

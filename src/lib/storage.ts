@@ -20,6 +20,10 @@ import {
   RuntimeMemory, StateDelta,
 } from './types';
 
+// NOTE: app was renamed "AI TokTok" → "In The Book", but localStorage /
+// IndexedDB names below intentionally keep the old `ai-toktok-*` identifiers
+// so existing users' configs and saves remain readable. Renaming would
+// silently strand all prior data.
 const CONFIG_KEY = 'ai-toktok-config';
 
 const DB_NAME = 'ai-toktok';

@@ -138,7 +138,7 @@ function parseArgs(argv: string[]): Args {
 
 function printHelp(): void {
   console.log(`
-build-preset — 把一段故事文本解析成 AI TokTok 的预设故事模块。
+build-preset — 把一段故事文本解析成 In The Book 的预设故事模块。
 
 用法:
   npm run build-preset -- --input <file> --slug <slug> --title <title> [选项]

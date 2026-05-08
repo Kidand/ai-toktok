@@ -23,7 +23,7 @@ const notoSerifSC = Noto_Serif_SC({
 });
 
 export const metadata: Metadata = {
-  title: "AI TokTok · 沉浸式互动叙事沙盒",
+  title: "In The Book · 沉浸式互动叙事沙盒",
   description: "穿越进入任意故事世界，与角色实时互动，产生个性化分支剧情",
 };
 

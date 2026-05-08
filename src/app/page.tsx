@@ -189,9 +189,9 @@ export default function HomePage() {
         </div>
 
         <h1 className="display text-[3.5rem] sm:text-[5rem] md:text-[6rem] leading-[0.88] mb-6">
-          AI<br />
+          IN THE<br />
           <span className="inline-block bg-[var(--hi-yellow)] border-[2.5px] border-[var(--ink)] px-3 py-1" style={{ boxShadow: '6px 6px 0 var(--ink)' }}>
-            TOK TOK
+            BOOK
           </span>
         </h1>
 
