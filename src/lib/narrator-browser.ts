@@ -693,9 +693,15 @@ export async function streamNarrationBrowser(
     ? MENTION_HINT_TEMPLATE(mentionedCharacterNames)
     : '';
   const choiceHint = fromChoice ? CHOICE_HINT : '';
+  const entryEvent = !historyContext
+    ? story.keyEvents[playerConfig.entryEventIndex]
+    : undefined;
+  const openingAnchor = entryEvent
+    ? `## 开场切入点（必须严格遵守）\n本次故事的开场直接从【${entryEvent.title}】这一节点切入，玩家此刻已身处该节点的情境之中。请不要回到故事的最开头，也不要先去铺垫此节点之前的剧情；让玩家"出现"的那一刻就是这个节点正在发生时。\n节点情境：${entryEvent.description}`
+    : `故事开始。玩家已进入故事世界。`;
   const userMessage = historyContext
     ? `## 之前的剧情\n${historyContext}\n\n## 玩家当前行动\n${playerInput}${mentionHint}${choiceHint}`
-    : `故事开始。玩家已进入故事世界。\n\n玩家的第一个行动：${playerInput || '（观察周围环境）'}${mentionHint}${choiceHint}`;
+    : `${openingAnchor}\n\n玩家的第一个行动：${playerInput || '（观察周围环境）'}${mentionHint}${choiceHint}`;
 
   let full = '';
   let lastSignature = '';

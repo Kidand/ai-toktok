@@ -77,8 +77,11 @@ ${locationSection}
 性格：${playerChar?.personality || ''}
 背景：${playerChar?.background || ''}
 
-## 当前剧情节点
-${entryEvent ? `从"${entryEvent.title}"开始：${entryEvent.description}` : '从故事开头开始'}
+## 当前剧情节点（开场严格遵守）
+${entryEvent
+  ? `本次互动的**开场必须直接从"${entryEvent.title}"这一节点切入**——不要回到故事最开头，也不要再铺垫此节点之前发生的事。玩家此刻就身处该节点的情境之中。
+节点情境：${entryEvent.description}`
+  : '从故事开头开始'}
 
 ## 世界观护栏
 ${strictnessGuide}
