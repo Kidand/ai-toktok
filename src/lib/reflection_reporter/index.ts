@@ -7,7 +7,7 @@
  *     page surfaces it on-demand or every N turns.
  */
 
-import { callLLMBrowser } from '../llm-browser';
+import { callLLMBrowser, type LLMStreamActivity } from '../llm-browser';
 import { extractFirstBalancedJSON, stripThinking } from '../narrator-browser';
 import {
   REFLECTION_SYSTEM_PROMPT, buildReflectionUserMessage,
@@ -78,6 +78,7 @@ export interface GenerateSceneReflectionInput {
 
 export async function generateSceneReflection(
   input: GenerateSceneReflectionInput,
+  opts?: { signal?: AbortSignal; onActivity?: (kind: LLMStreamActivity) => void },
 ): Promise<SceneReflection> {
   const { config, story, playerConfig, history, windowTurns = 6, recentDeltas } = input;
   const playerChar = playerConfig.entryMode === 'soul-transfer'
@@ -99,7 +100,7 @@ export async function generateSceneReflection(
 
   const raw = await callLLMBrowser(
     config, REFLECTION_SYSTEM_PROMPT, userMessage,
-    { temperature: 0.4, maxTokens: 1500 },
+    { temperature: 0.4, maxTokens: 1500, signal: opts?.signal, onActivity: opts?.onActivity },
   );
   const cleaned = stripThinking(raw);
   const balanced = extractFirstBalancedJSON(cleaned) || cleaned;

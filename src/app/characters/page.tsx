@@ -128,30 +128,36 @@ export default function CharactersPage() {
               <Section title="性格" mono="PERSONALITY" body={selected.personality} />
               <Section title="背景" mono="BACKGROUND" body={selected.background} />
 
-              {selected.relationships.length > 0 && (
-                <section className="mb-6">
-                  <SectionHead mono="RELATIONS" title="关系网络" />
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {selected.relationships.map((rel, idx) => {
-                      const tName = getRelationName(rel.characterId);
-                      return (
-                        <button key={idx}
-                                onClick={() => {
-                                  const target = allCharacters.find(c => c.id === rel.characterId);
-                                  if (target) setSelected(target);
-                                }}
-                                className="choice-card flex items-center gap-3 text-left">
-                          <div className="avatar avatar-sm" data-speaker-color={speakerColor(tName)}>{tName[0]}</div>
-                          <div className="min-w-0">
-                            <div className="font-sans font-bold text-sm truncate">{tName}</div>
-                            <span className="text-xs text-[var(--ink-muted)] font-mono">▸ {rel.relation}</span>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </section>
-              )}
+              {selected.relationships.length > 0 && (() => {
+                const knownRels = selected.relationships.filter(
+                  rel => allCharacters.some(c => c.id === rel.characterId),
+                );
+                if (!knownRels.length) return null;
+                return (
+                  <section className="mb-6">
+                    <SectionHead mono="RELATIONS" title="关系网络" />
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      {knownRels.map((rel, idx) => {
+                        const tName = getRelationName(rel.characterId);
+                        return (
+                          <button key={idx}
+                                  onClick={() => {
+                                    const target = allCharacters.find(c => c.id === rel.characterId);
+                                    if (target) setSelected(target);
+                                  }}
+                                  className="choice-card flex items-center gap-3 text-left">
+                            <div className="avatar avatar-sm" data-speaker-color={speakerColor(tName)}>{tName[0]}</div>
+                            <div className="min-w-0">
+                              <div className="font-sans font-bold text-sm truncate">{tName}</div>
+                              <span className="text-xs text-[var(--ink-muted)] font-mono">▸ {rel.relation}</span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                );
+              })()}
 
               {(() => {
                 const events = parsedStory.keyEvents.filter(e => e.involvedCharacterIds.includes(selected.id));

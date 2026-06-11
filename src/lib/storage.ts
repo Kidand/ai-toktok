@@ -60,7 +60,14 @@ export function saveLLMConfig(config: LLMConfig): void {
 export function loadLLMConfig(): LLMConfig | null {
   if (typeof window === 'undefined') return null;
   const raw = localStorage.getItem(CONFIG_KEY);
-  return raw ? JSON.parse(raw) : null;
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    console.warn('[storage] loadLLMConfig: corrupt JSON, clearing entry.', err);
+    localStorage.removeItem(CONFIG_KEY);
+    return null;
+  }
 }
 
 // =============================================================================

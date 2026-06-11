@@ -10,7 +10,7 @@
  * orchestrator does NOT route them — they're side-channels by design.
  */
 
-import { callLLMBrowser } from '../llm-browser';
+import { callLLMBrowser, type LLMStreamActivity } from '../llm-browser';
 import { stripThinking } from '../narrator-browser';
 import {
   AGENT_INTERVIEW_SYSTEM, WORLD_QA_SYSTEM, IF_ELSE_SANDBOX_SYSTEM,
@@ -38,7 +38,7 @@ export async function agentInterview(args: {
   agent: AgentProfile;
   question: string;
   priorTurns?: { question: string; answer: string }[];
-}): Promise<string> {
+}, opts?: { signal?: AbortSignal; onActivity?: (kind: LLMStreamActivity) => void }): Promise<string> {
   const ctx = buildDeepInteractionContext({
     story: args.story, playerConfig: args.playerConfig,
     history: args.history, agent: args.agent,
@@ -54,6 +54,8 @@ export async function agentInterview(args: {
     temperature: 0.7,
     maxTokens: 600,
     priorMessages,
+    signal: opts?.signal,
+    onActivity: opts?.onActivity,
   });
   logEvent('deep.interaction', {
     kind: 'agentInterview',

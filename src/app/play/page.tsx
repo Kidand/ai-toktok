@@ -8,9 +8,11 @@ import { generateSceneReflection, type SceneReflection } from '@/lib/reflection_
 import { agentInterview } from '@/lib/reflection_reporter/deep-interaction';
 import { agentProfileFromCharacter } from '@/lib/agent_factory';
 import { getDisplayCharacters } from '@/lib/cast';
+import { createVitalsTracker, type StreamVitals } from '@/lib/stream_harness';
+import { StreamVitalsIndicator } from '@/components/StreamVitalsIndicator';
 import { NarrativeFeed, speakerColor } from '@/components/NarrativeFeed';
 import { MentionInput, MentionInputHandle, MentionCandidate, MentionParsed } from '@/components/MentionInput';
-import { ArrowLeft, Users, Send, Close, Sparkles, Globe } from '@/components/Icons';
+import { ArrowLeft, Users, Send, Close, Sparkles, Globe, Spinner } from '@/components/Icons';
 
 const SYSTEM_MENTION_ID = 'system';
 const PRESENCE_WINDOW = 5;
@@ -33,6 +35,11 @@ export default function PlayPage() {
   const [showSidebar, setShowSidebar] = useState(false);
   const [expandedCharId, setExpandedCharId] = useState<string | null>(null);
   const [streamingState, setStreamingState] = useState<StreamingState>({ narration: '', dialogues: [] });
+  // 每条 LLM 链路各自的「生命体征」——只暴露思考元数据，不暴露思考正文。
+  const [narrateVitals, setNarrateVitals] = useState<StreamVitals | null>(null);
+  const [hintVitals, setHintVitals] = useState<StreamVitals | null>(null);
+  const [reflectionVitals, setReflectionVitals] = useState<StreamVitals | null>(null);
+  const [interviewVitals, setInterviewVitals] = useState<StreamVitals | null>(null);
   const [endConfirm, setEndConfirm] = useState(false);
   const [systemHint, setSystemHint] = useState<{ question: string; answer: string; loading: boolean } | null>(null);
   const [reflection, setReflection] = useState<{ loading: boolean; data: SceneReflection | null; error?: string } | null>(null);
@@ -51,14 +58,36 @@ export default function PlayPage() {
     error?: string;
   } | null>(null);
   const [interviewDraft, setInterviewDraft] = useState('');
+  const [narrateError, setNarrateError] = useState<{ message: string; retry: { action: string; playerInput?: string; mentionedNames?: string[]; fromChoice?: boolean } } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<MentionInputHandle>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  const stickToBottomRef = useRef(true);
+  const openingAttemptedRef = useRef(false);
+  const interviewScrollRef = useRef<HTMLDivElement>(null);
+  const interviewInputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Abort any in-flight narration when the component unmounts.
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   useEffect(() => {
-    if (scrollRef.current) {
+    if (scrollRef.current && stickToBottomRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [narrativeHistory, streamingState, systemHint]);
+
+  // Keep the interview transcript pinned to the latest turn as it grows.
+  useEffect(() => {
+    if (interviewScrollRef.current) {
+      interviewScrollRef.current.scrollTop = interviewScrollRef.current.scrollHeight;
+    }
+  }, [interview?.turns.length, interview?.loading]);
+
+  // Focus the question box whenever a new interview opens.
+  const interviewCharacterId = interview?.characterId;
+  useEffect(() => {
+    if (interviewCharacterId) interviewInputRef.current?.focus();
+  }, [interviewCharacterId]);
 
   /** Full cast = preset characters + reincarnated player (if any). */
   const cast = useMemo(
@@ -116,31 +145,66 @@ export default function PlayPage() {
     fromChoice?: boolean,
   ) => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setNarrateError(null);
     setIsGenerating(true);
     setStreamingState({ narration: '', dialogues: [] });
     const input = action === 'opening' ? '（我刚刚来到这个世界，环顾四周）' : (playerInput || '');
+    const tracker = createVitalsTracker({ onUpdate: setNarrateVitals });
     try {
       const raw = await streamNarrationBrowser(
         llmConfig, parsedStory, playerConfig,
         guardrailParams, narrativeBalance,
         narrativeHistory, input,
-        (state) => setStreamingState(state),
+        (state) => {
+          setStreamingState(state);
+          tracker.noteVisible(
+            state.narration.length + state.dialogues.reduce((n, d) => n + d.content.length, 0),
+          );
+        },
         mentionedNames,
         fromChoice,
         injectionConfig,
+        { signal: ac.signal, onActivity: kind => kind === 'reasoning' ? tracker.noteThinking() : tracker.noteRaw() },
       );
       setStreamingState({ narration: '', dialogues: [] });
       const result = parseNarrationResponse(raw, parsedStory, input);
+      if (result.failed) {
+        // Both parse paths produced nothing usable. Surface a clean retry
+        // instead of committing a fake narration entry / autosaving garbage.
+        setNarrateError({
+          message: '模型输出格式异常，未能解析出叙事内容',
+          retry: { action, playerInput, mentionedNames, fromChoice },
+        });
+        return;
+      }
       addNarrativeEntries(result.entries);
       if (result.interactions?.length) {
         addCharacterInteractions(result.interactions as Parameters<typeof addCharacterInteractions>[0]);
       }
       autoSave();
     } catch (err) {
+      // Abort = the caller deliberately gave up this turn; surface nothing.
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       console.error('叙事生成失败:', err);
+      setNarrateError({
+        message: err instanceof Error ? err.message : '叙事生成失败',
+        retry: { action, playerInput, mentionedNames, fromChoice },
+      });
     } finally {
-      setIsGenerating(false);
-      setStreamingState({ narration: '', dialogues: [] });
+      // 无条件 dispose：被新请求 abort 的旧 tracker 必须立刻噤声，
+      // 否则它残余的 onUpdate 会污染新请求的 vitals。
+      tracker.dispose();
+      // Only the still-current request may clear the shared generating state —
+      // a request aborted by a newer one would otherwise stomp its successor's
+      // freshly-set isGenerating/streamingState. 清空 vitals 同理只能由当前请求做。
+      if (abortRef.current === ac) {
+        setIsGenerating(false);
+        setStreamingState({ narration: '', dialogues: [] });
+        setNarrateVitals(null);
+      }
     }
   }, [llmConfig, parsedStory, playerConfig, guardrailParams, narrativeBalance, narrativeHistory, injectionConfig, addNarrativeEntries, addCharacterInteractions, autoSave, setIsGenerating]);
 
@@ -150,7 +214,8 @@ export default function PlayPage() {
   }, [llmConfig, parsedStory, playerConfig, narrativeHistory.length, streamNarrate]);
 
   useEffect(() => {
-    if (isPlaying && narrativeHistory.length === 0 && !isGenerating) {
+    if (isPlaying && narrativeHistory.length === 0 && !isGenerating && !openingAttemptedRef.current) {
+      openingAttemptedRef.current = true;
       generateOpening();
     }
   }, [isPlaying, narrativeHistory.length, isGenerating, generateOpening]);
@@ -190,24 +255,31 @@ export default function PlayPage() {
       // Strip the @系统 mention from the question to keep it clean
       const question = text.replace(/@系统\s*/g, '').trim() || '请给我一些提示';
       setSystemHint({ question, answer: '', loading: true });
+      const tracker = createVitalsTracker({ onUpdate: setHintVitals });
       try {
         const answer = await systemHintBrowser(
           llmConfig, parsedStory, playerConfig, narrativeHistory, question,
+          { onActivity: kind => kind === 'reasoning' ? tracker.noteThinking() : tracker.noteRaw() },
         );
         setSystemHint({ question, answer, loading: false });
       } catch (err) {
         console.error('系统提示生成失败:', err);
         setSystemHint({ question, answer: '系统暂时无法回应，请稍后再试。', loading: false });
+      } finally {
+        tracker.dispose();
+        setHintVitals(null);
       }
       return;
     }
 
+    stickToBottomRef.current = true;
     addPlayerAction(text);
     await streamNarrate('narrate', text, characterMentions.length > 0 ? characterMentions : undefined);
   };
 
   const handleChoice = (choiceText: string) => {
     if (isGenerating || !llmConfig) return;
+    stickToBottomRef.current = true;
     addPlayerAction(choiceText);
     streamNarrate('narrate', choiceText, undefined, true);
   };
@@ -215,16 +287,20 @@ export default function PlayPage() {
   const handleReflection = async () => {
     if (!llmConfig || !parsedStory || !playerConfig) return;
     setReflection({ loading: true, data: null });
+    const tracker = createVitalsTracker({ onUpdate: setReflectionVitals });
     try {
       const data = await generateSceneReflection({
         config: llmConfig,
         story: parsedStory,
         playerConfig,
         history: narrativeHistory,
-      });
+      }, { onActivity: kind => kind === 'reasoning' ? tracker.noteThinking() : tracker.noteRaw() });
       setReflection({ loading: false, data });
     } catch (err) {
       setReflection({ loading: false, data: null, error: err instanceof Error ? err.message : '生成失败' });
+    } finally {
+      tracker.dispose();
+      setReflectionVitals(null);
     }
   };
 
@@ -247,6 +323,7 @@ export default function PlayPage() {
       pending: { question: trimmed },
       loading: true,
     });
+    const tracker = createVitalsTracker({ onUpdate: setInterviewVitals });
     try {
       const projectId = parsedStory.project?.id || parsedStory.id;
       const profile = parsedStory.agents?.find(a => a.entityId === character.id)
@@ -259,7 +336,7 @@ export default function PlayPage() {
         agent: profile,
         question: trimmed,
         priorTurns: existingTurns,
-      });
+      }, { onActivity: kind => kind === 'reasoning' ? tracker.noteThinking() : tracker.noteRaw() });
       setInterview({
         characterId,
         characterName: character.name,
@@ -275,6 +352,9 @@ export default function PlayPage() {
         loading: false,
         error: err instanceof Error ? err.message : '访谈失败',
       });
+    } finally {
+      tracker.dispose();
+      setInterviewVitals(null);
     }
   };
 
@@ -288,7 +368,8 @@ export default function PlayPage() {
   };
 
   const lastChoices = [...narrativeHistory].reverse().find(e => e.choices?.length)?.choices;
-  const canEnd = narrativeHistory.length >= 4;
+  const playerTurnCount = narrativeHistory.filter(e => e.type === 'player-action').length;
+  const canEnd = playerTurnCount >= 4;
 
   return (
     <div className="h-screen flex flex-col bg-[var(--paper)]">
@@ -304,7 +385,7 @@ export default function PlayPage() {
               <h1 className="font-sans font-bold text-sm truncate">{parsedStory.title}</h1>
             </div>
             <p className="text-xs text-[var(--ink-muted)] font-mono truncate mt-0.5">
-              {playerChar?.name || '旅人'} · {playerConfig.entryMode === 'soul-transfer' ? 'soul-transfer' : 'reincarnation'} · T{String(narrativeHistory.filter(e => e.type === 'player-action').length).padStart(2, '0')}
+              {playerChar?.name || '旅人'} · {playerConfig.entryMode === 'soul-transfer' ? 'soul-transfer' : 'reincarnation'} · T{String(playerTurnCount).padStart(2, '0')}
             </p>
           </div>
         </div>
@@ -332,7 +413,14 @@ export default function PlayPage() {
       </header>
 
       {/* 主叙事区 */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto">
+      <div
+        ref={scrollRef}
+        className="flex-1 overflow-y-auto"
+        onScroll={e => {
+          const el = e.currentTarget;
+          stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+        }}
+      >
         <div className="max-w-3xl mx-auto px-4 sm:px-6 py-6">
           {!canEnd && (
             <div className="system-line mb-6">互动至少 4 次后可结束</div>
@@ -343,6 +431,8 @@ export default function PlayPage() {
             streamingNarration={streamingState.narration}
             streamingDialogues={streamingState.dialogues}
             isGenerating={isGenerating}
+            vitals={narrateVitals}
+            onCancelStream={() => abortRef.current?.abort()}
           />
         </div>
       </div>
@@ -378,8 +468,32 @@ export default function PlayPage() {
               </div>
               <div className="system-hint-body">
                 {systemHint.loading
-                  ? <span className="text-[var(--ink-muted)] italic typing-cursor">正在查询</span>
+                  ? <StreamVitalsIndicator vitals={hintVitals} busyLabel="正在查询" />
                   : systemHint.answer}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 叙事失败错误条 */}
+      {narrateError && (
+        <div className="shrink-0 px-4 sm:px-6 pb-3 anim-fade-in">
+          <div className="max-w-3xl mx-auto">
+            <div className="surface p-3 flex items-start gap-3" style={{ boxShadow: '3px 3px 0 var(--hi-coral)' }}>
+              <div className="min-w-0 flex-1">
+                <div className="label-mono text-[10px] mb-1 text-[var(--hi-coral)]">FAILED</div>
+                <p className="font-mono text-xs break-words">{narrateError.message}</p>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  className="btn btn-primary btn-sm"
+                  onClick={() => {
+                    const { action, playerInput, mentionedNames, fromChoice } = narrateError.retry;
+                    streamNarrate(action, playerInput, mentionedNames, fromChoice);
+                  }}
+                >重试</button>
+                <button className="btn btn-ghost btn-sm" onClick={() => setNarrateError(null)}>关闭</button>
               </div>
             </div>
           </div>
@@ -403,7 +517,7 @@ export default function PlayPage() {
             }}
             disabled={isGenerating}
             className="btn btn-primary shrink-0" aria-label="发送">
-            <Send width={18} height={18} />
+            {isGenerating ? <Spinner width={18} height={18} /> : <Send width={18} height={18} />}
             <span className="hidden sm:inline">行动</span>
           </button>
         </div>
@@ -559,7 +673,7 @@ export default function PlayPage() {
               </button>
             </div>
             {reflection.loading && (
-              <p className="font-mono text-sm text-[var(--ink-muted)]">▸ 正在回顾本段剧情…</p>
+              <StreamVitalsIndicator vitals={reflectionVitals} busyLabel="正在回顾本段剧情" />
             )}
             {reflection.error && (
               <p className="font-mono text-sm text-[var(--hi-coral)]">✕ {reflection.error}</p>
@@ -633,7 +747,7 @@ export default function PlayPage() {
             </p>
 
             {/* 完整对话历史 + 当前 pending 一问 */}
-            <div className="flex-1 overflow-y-auto space-y-3 pr-1">
+            <div ref={interviewScrollRef} className="flex-1 overflow-y-auto space-y-3 pr-1">
               {interview.turns.map((t, i) => (
                 <div key={i} className="space-y-2">
                   <div className="surface p-3 bg-[var(--paper-softsink)]">
@@ -655,7 +769,7 @@ export default function PlayPage() {
               {interview.loading && (
                 <div className="surface p-3">
                   <div className="label-mono text-[10px] mb-1">{interview.characterName.toUpperCase()}</div>
-                  <p className="font-mono text-sm text-[var(--ink-muted)] typing-cursor">▸ 思考中</p>
+                  <StreamVitalsIndicator vitals={interviewVitals} busyLabel={`${interview.characterName} 正在思考`} />
                 </div>
               )}
               {interview.error && !interview.loading && (
@@ -669,6 +783,7 @@ export default function PlayPage() {
             {/* 输入区 */}
             <div className="mt-3 shrink-0 border-t-[2.5px] border-[var(--ink)] pt-3">
               <textarea
+                ref={interviewInputRef}
                 className="textarea"
                 rows={2}
                 placeholder={`问 ${interview.characterName} 一个问题…`}

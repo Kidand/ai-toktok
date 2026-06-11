@@ -84,6 +84,8 @@ export interface LLMCallOptions {
   maxTokens?: number;
   onActivity?: (kind: LLMStreamActivity) => void;
   priorMessages?: PriorMessage[];
+  // 调用方 abort 后 fetch 与读流立即终止，错误以 DOMException AbortError 形式抛出。
+  signal?: AbortSignal;
 }
 
 export async function callLLMBrowser(
@@ -110,10 +112,11 @@ export async function* streamLLMBrowser(
   const onActivity = options?.onActivity;
 
   const priorMessages = options?.priorMessages;
+  const signal = options?.signal;
   if (config.provider === 'openai') {
-    yield* streamOpenAI(config, systemPrompt, userMessage, temp, maxTokens, onActivity, priorMessages);
+    yield* streamOpenAI(config, systemPrompt, userMessage, temp, maxTokens, onActivity, priorMessages, signal);
   } else {
-    yield* streamAnthropic(config, systemPrompt, userMessage, temp, maxTokens, onActivity, priorMessages);
+    yield* streamAnthropic(config, systemPrompt, userMessage, temp, maxTokens, onActivity, priorMessages, signal);
   }
 }
 
@@ -125,6 +128,7 @@ async function* streamOpenAI(
   maxTokens: number,
   onActivity?: (kind: LLMStreamActivity) => void,
   priorMessages?: PriorMessage[],
+  signal?: AbortSignal,
 ): AsyncGenerator<string> {
   const base = config.baseUrl?.replace(/\/+$/, '') || DEFAULT_OPENAI_BASE;
   const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
@@ -145,6 +149,7 @@ async function* streamOpenAI(
       max_tokens: maxTokens,
       stream: true,
     }),
+    signal,
   });
   if (!res.ok) {
     const err = await res.text();
@@ -215,6 +220,7 @@ async function* streamAnthropic(
   maxTokens: number,
   onActivity?: (kind: LLMStreamActivity) => void,
   priorMessages?: PriorMessage[],
+  signal?: AbortSignal,
 ): AsyncGenerator<string> {
   const base = config.baseUrl?.replace(/\/+$/, '') || DEFAULT_ANTHROPIC_BASE;
   const messages: { role: 'user' | 'assistant'; content: string }[] = [
@@ -237,6 +243,7 @@ async function* streamAnthropic(
       max_tokens: maxTokens,
       stream: true,
     }),
+    signal,
   });
   if (!res.ok) {
     const err = await res.text();

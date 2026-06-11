@@ -6,12 +6,14 @@
  *   - the player's identity
  *   - the entry event
  *   - the three product knobs (strictness / narrative weight / temperature)
- *   - the JSON output contract that the streaming parser depends on
+ *   - the 「:::指令行」output contract that the streaming parser depends on
  *
  * The literal Chinese phrasing here is hard-won product wisdom — wording like
  * "禁止『继续观察』这类原地打转的选项" comes from real failure cases. Edit
- * with care and keep the JSON contract intact, otherwise the streaming parser
- * in narrator-browser breaks.
+ * with care and keep the directive-line contract in lockstep with the parser
+ * in src/lib/narration_protocol — the prompt's grammar and the parser's
+ * grammar must never drift apart. (Legacy JSON responses still parse via the
+ * fallback path in narrator-browser, so older models degrade gracefully.)
  */
 
 import type { ParsedStory, PlayerConfig, GuardrailParams, NarrativeBalance } from '../types';
@@ -112,20 +114,27 @@ ${narrativeGuide}
 - 避免"等等看"、"再观察"、"暂不行动"这类使剧情停滞的选项
 
 ## 交互格式要求
-你的每次回复必须严格按照以下JSON格式返回，不要包含任何其他文字：
+你的每次回复是一份**纯文本指令文档**，由「:::指令行」和正文行构成。不要输出 JSON，不要用代码围栏包裹，不要在文档前后添加任何解释性文字。
 
-{
-  "narration": "叙事内容",
-  "dialogues": [{ "speaker": "角色名", "content": "对话内容" }],
-  "choices": [
-    { "text": "选项描述", "isBranchPoint": false }
-  ],
-  "interactions": [
-    { "characterName": "角色名", "event": "互动事件", "reaction": "角色反应", "sentiment": "positive/neutral/negative" }
-  ]
-}
+指令行语法（::: 必须出现在行首）：
+- :::narration —— 开启一段叙事；其后的行都是叙事正文，直到下一条指令行。可多次使用
+- :::say 角色名 —— 开启一段该角色的对白；其后的行都是对白内容。角色名必须是上方角色列表中出现过的名字
+- :::choice 选项文本 —— 单行：给玩家的一个行动选项
+- :::choice! 选项文本 —— 单行：带 ! 表示这是会改变剧情走向的分支点选项
+- :::interact 角色名 | positive或neutral或negative | 互动事件简述 | 角色对玩家的反应 —— 单行：记录本轮与玩家发生实质互动的角色，第二段只能取这三个值之一
 
-注意：choices 提供 2-3 个选项（都要是具体行动）；interactions 记录本轮有反应的角色。`;
+输出顺序：先 :::narration（叙事最先到达，玩家立刻能读到文字），随后用 :::say 给出对白（如有），然后 2-3 条 :::choice（每条都必须是具体行动），最后是 :::interact 行（只记录本轮真正做出反应的角色，没有就省略）。
+
+示例（仅示意格式，人物与内容和本故事无关）：
+:::narration
+雨水顺着屋檐砸下来。巷口的灯笼晃了两晃，灭了。
+阿明把伞收紧，认出了那个背影。
+:::say 阿明
+这么晚了，你怎么会在这里？
+:::choice 如实说出自己的来意
+:::choice 谎称只是路过
+:::choice! 转身就走，装作没看见他
+:::interact 阿明 | neutral | 在巷口偶遇玩家 | 警觉地打量玩家`;
 }
 
 export function buildHistoryContext(
@@ -143,7 +152,7 @@ export function buildHistoryContext(
 }
 
 export const MENTION_HINT_TEMPLATE = (names: string[]) =>
-  `\n\n## 玩家明确指向的对象\n玩家在本次行动中主动面向并互动的角色：${names.join('、')}。请让这些角色在回应中发挥主要作用（如对话、反应）。`;
+  `\n\n## 玩家明确指向的对象\n玩家在本次行动中主动面向并互动的角色：${names.join('、')}。请让这些角色在回应中发挥主要作用——用 :::say 给出他们的对白与反应。`;
 
 export const CHOICE_HINT =
   `\n\n## 注意\n玩家是从预设选项中选取了一个行动。请以此为起点让剧情**实质推进**（一件具体的事发生），不要用氛围描写填充替代真正的进展。`;
@@ -153,6 +162,11 @@ export const CHOICE_HINT =
  * system prompt) when the orchestrator wants the model to also emit hidden
  * intents + a structured state delta. Backwards-compatible: the legacy
  * parser ignores fields it doesn't know.
+ *
+ * NOTE: this extension speaks JSON because the v2 orchestrator's
+ * parseDialogueResponse expects JSON. It must NOT be appended to the
+ * directive-line protocol prompt above — the two formats are mutually
+ * exclusive per response.
  */
 export const STATE_DELTA_OUTPUT_EXTENSION = `
 

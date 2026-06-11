@@ -12,7 +12,7 @@
 
 import { createStore, get as idbGet, set as idbSet, keys as idbKeys, clear as idbClear } from 'idb-keyval';
 import { callLLMBrowser, streamLLMBrowser } from './llm-browser';
-import { stripThinking, extractFirstBalancedJSON } from './narrator-browser';
+import { stripThinking, extractFirstBalancedJSON, sanitizeLikelyJSON } from './narrator-browser';
 import { logEvent } from './telemetry';
 import {
   INITIAL_PARSE_PROMPT,
@@ -120,6 +120,8 @@ export type ParseProgress = {
   /** Number of reasoning tokens seen since the chunk started. Drives a
    *  pulsing placeholder bar so the user can tell the connection is alive. */
   thinkingTicks?: number;
+  /** 解析失败被跳过的分片数，UI 用来提示用户部分内容缺失 */
+  skippedChunks?: number;
 };
 
 // Prompts live in src/lib/prompts/world-extraction.ts. They are imported above.
@@ -521,7 +523,14 @@ async function parseChunkIncremental(
       }
     }
     onChunkProgress?.(0.98);
-    return JSON.parse(extractJSON(full)) as ChunkParseResult;
+    const jsonStr = extractJSON(full);
+    try {
+      return JSON.parse(jsonStr) as ChunkParseResult;
+    } catch {
+      // First-pass parse failed — try the common-mistake repair, then let
+      // withRetry re-prompt (a fresh attempt may return valid JSON).
+      return JSON.parse(sanitizeLikelyJSON(jsonStr)) as ChunkParseResult;
+    }
   }, MAX_RETRIES, (attempt) => onRetry?.(attempt));
 }
 
@@ -576,6 +585,9 @@ export async function parseStoryClient(
     }
   }
 
+  // JSON 救援：单片经全部重试仍解析失败时跳过，避免毁掉整次导入。
+  let skipped = 0;
+
   onProgress?.({
     phase: 'parse', current: startIndex, total,
     resumedFrom, characters: graph.characters.length,
@@ -583,22 +595,46 @@ export async function parseStoryClient(
 
   for (let i = startIndex; i < total; i++) {
     logEvent('parser.chunk_start', { chunkIndex: i, total });
-    const chunkResult = await parseChunkIncremental(
-      config, chunks[i], i, total, graph,
-      (frac) => onProgress?.({
-        phase: 'parse', current: i + frac, total,
+    let chunkResult: ChunkParseResult;
+    try {
+      chunkResult = await parseChunkIncremental(
+        config, chunks[i], i, total, graph,
+        (frac) => onProgress?.({
+          phase: 'parse', current: i + frac, total,
+          resumedFrom, characters: graph.characters.length,
+          ...(skipped > 0 ? { skippedChunks: skipped } : {}),
+        }),
+        (attempt) => onProgress?.({
+          phase: 'parse', current: i, total,
+          resumedFrom, retrying: attempt, characters: graph.characters.length,
+          ...(skipped > 0 ? { skippedChunks: skipped } : {}),
+        }),
+        (ticks) => onProgress?.({
+          phase: 'parse', current: i, total,
+          resumedFrom, characters: graph.characters.length,
+          thinking: true, thinkingTicks: ticks,
+          ...(skipped > 0 ? { skippedChunks: skipped } : {}),
+        }),
+      );
+    } catch (err) {
+      // 首片不可跳过：title/worldSetting/初始角色这套首块 schema 只在
+      // chunkIndex 0 上提取（INITIAL_PARSE_PROMPT + normalizeFirstChunk），
+      // 跳过它会静默产出一份元数据残缺的故事。直接失败让用户重试。
+      if (i === 0) {
+        logEvent('parser.error', { stage: 'parse', chunkIndex: 0, total, error: String(err) });
+        throw new Error('故事开头部分解析失败，无法提取世界观信息，请重试或更换模型');
+      }
+      // 其余片全部重试用尽仍失败：跳过该片（不合并、不写快照），继续下一片。
+      skipped++;
+      console.warn(`Chunk ${i} failed after retries, skipping:`, err);
+      logEvent('parser.error', { stage: 'chunk_skipped', chunkIndex: i, total, error: String(err) });
+      onProgress?.({
+        phase: 'parse', current: i + 1, total,
         resumedFrom, characters: graph.characters.length,
-      }),
-      (attempt) => onProgress?.({
-        phase: 'parse', current: i, total,
-        resumedFrom, retrying: attempt, characters: graph.characters.length,
-      }),
-      (ticks) => onProgress?.({
-        phase: 'parse', current: i, total,
-        resumedFrom, characters: graph.characters.length,
-        thinking: true, thinkingTicks: ticks,
-      }),
-    );
+        skippedChunks: skipped,
+      });
+      continue;
+    }
 
     const normalized = i === 0 ? normalizeFirstChunk(chunkResult) : chunkResult;
     graph = applyChunkUpdate(graph, normalized, i);
@@ -617,7 +653,14 @@ export async function parseStoryClient(
     onProgress?.({
       phase: 'parse', current: i + 1, total,
       resumedFrom, characters: graph.characters.length,
+      ...(skipped > 0 ? { skippedChunks: skipped } : {}),
     });
+  }
+
+  // 所有片全部失败（图谱为空）时抛错，让用户看到「解析失败」而非空故事。
+  if (skipped > 0 && graph.characters.length === 0) {
+    logEvent('parser.error', { stage: 'parse', error: 'all chunks failed', skipped });
+    throw new Error(`故事解析失败：${skipped} 个分片均无法解析`);
   }
 
   // Sort events by accumulated timeIndex and renumber

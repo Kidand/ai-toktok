@@ -31,7 +31,9 @@ export default function HomePage() {
   const [storyText, setStoryText] = useState('');
   const [fileName, setFileName] = useState('');
   const [error, setError] = useState('');
-  const [parseProgress, setParseProgress] = useState<{ phase: string; current: number; total: number; resumedFrom?: number; retrying?: number; characters?: number; thinking?: boolean; thinkingTicks?: number }>({ phase: '', current: 0, total: 0 });
+  const [parseProgress, setParseProgress] = useState<{ phase: string; current: number; total: number; resumedFrom?: number; retrying?: number; characters?: number; thinking?: boolean; thinkingTicks?: number; skippedChunks?: number }>({ phase: '', current: 0, total: 0 });
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
   const [tab, setTab] = useState<'presets' | 'new' | 'saves'>('presets');
   const [showApiDetails, setShowApiDetails] = useState(false);
   const [verify, setVerify] = useState<VerifyState>({ status: 'idle' });
@@ -120,44 +122,56 @@ export default function HomePage() {
   };
 
   const handleLoadSave = async (save: GameSave) => {
+    if (pendingId) return;
     if (!apiKey.trim()) { setError('请先配置 API 密钥'); return; }
-    const story = await loadStory(save.storyId);
-    if (!story) { setError('找不到对应的故事数据'); return; }
-    setLLMConfig(buildConfig());
-    loadFromSave(save, story);
-    router.push('/play');
+    setPendingId(save.id);
+    try {
+      const story = await loadStory(save.storyId);
+      if (!story) { setError('找不到对应的故事数据'); return; }
+      setLLMConfig(buildConfig());
+      loadFromSave(save, story);
+      router.push('/play');
+    } finally {
+      setPendingId(null);
+    }
   };
 
   const handleDeleteSave = async (saveId: string) => {
-    if (!confirm('确定删除这个存档？')) return;
     await removeSave(saveId);
+    setDeleteConfirmId(null);
   };
 
   const handlePickPreset = async (preset: Preset) => {
+    if (pendingId) return;
     if (!apiKey.trim()) {
       setError('请先填写 API 密钥');
       return;
     }
     setError('');
+    setPendingId(preset.id);
     const config = buildConfig();
 
-    if (!verifiedForCurrent) {
-      setVerify({ status: 'verifying' });
-      const result = await verifyLLMConfig(config);
-      if (!result.ok) {
-        setVerify({ status: 'error', sig: configSig, message: result.error });
-        setError(`API 无效：${result.error}`);
-        return;
+    try {
+      if (!verifiedForCurrent) {
+        setVerify({ status: 'verifying' });
+        const result = await verifyLLMConfig(config);
+        if (!result.ok) {
+          setVerify({ status: 'error', sig: configSig, message: result.error });
+          setError(`API 无效：${result.error}`);
+          return;
+        }
+        setVerify({ status: 'ok', sig: configSig });
       }
-      setVerify({ status: 'ok', sig: configSig });
-    }
 
-    setLLMConfig(config);
-    // setParsedStory now persists the story to IndexedDB internally, so saves
-    // generated from this preset can later reload the body by id like any
-    // user-uploaded story.
-    setParsedStory(preset.story);
-    router.push('/setup');
+      setLLMConfig(config);
+      // setParsedStory now persists the story to IndexedDB internally, so saves
+      // generated from this preset can later reload the body by id like any
+      // user-uploaded story.
+      setParsedStory(preset.story);
+      router.push('/setup');
+    } finally {
+      setPendingId(null);
+    }
   };
 
   if (!mounted) {
@@ -234,6 +248,9 @@ export default function HomePage() {
 
             <FormField label="API KEY">
               <input className="input input-mono" type="password" value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={provider === 'openai' ? 'sk-...' : 'sk-ant-...'} />
+              <p className="font-mono text-xs text-[var(--ink-muted)] mt-1.5 leading-relaxed">
+                密钥仅保存在你的浏览器本地 · 建议使用最小权限/独立项目的 key
+              </p>
             </FormField>
 
             <div className="mt-3 flex items-center gap-2 flex-wrap">
@@ -306,7 +323,7 @@ export default function HomePage() {
               {PRESETS.map((preset, i) => (
                 <button key={preset.id}
                         onClick={() => handlePickPreset(preset)}
-                        disabled={!apiKey.trim() || verify.status === 'verifying'}
+                        disabled={!apiKey.trim() || !!pendingId}
                         className="choice-card text-left disabled:opacity-50 disabled:cursor-not-allowed"
                         style={{ transform: `rotate(${i % 2 === 0 ? -0.3 : 0.35}deg)` }}>
                   <div className="flex items-center gap-2 mb-2 flex-wrap">
@@ -322,7 +339,7 @@ export default function HomePage() {
                   <div className="mt-3 pt-3 border-t-2 border-[var(--ink)] border-dashed flex items-center justify-between">
                     <span className="label-mono text-[10px]">{preset.story.keyEvents.length} EVENTS · {preset.story.characters.length} CAST</span>
                     <span className="font-mono font-bold text-sm">
-                      {verify.status === 'verifying' ? '验证中…' : '开始 →'}
+                      {pendingId === preset.id ? '加载中…' : '开始 →'}
                     </span>
                   </div>
                 </button>
@@ -434,6 +451,9 @@ export default function HomePage() {
                     {parseProgress.retrying && (
                       <span className="chip chip-coral">重试 #{parseProgress.retrying}</span>
                     )}
+                    {parseProgress.skippedChunks !== undefined && parseProgress.skippedChunks > 0 && (
+                      <span className="chip chip-coral">已跳过 {parseProgress.skippedChunks} 段</span>
+                    )}
                     <span className="font-mono text-sm font-bold tabular-nums">{Math.round(progressPct)}%</span>
                   </div>
                 </div>
@@ -493,13 +513,20 @@ export default function HomePage() {
                           </span>
                         </div>
                       </div>
-                      <button onClick={() => handleDeleteSave(save.id)} className="btn btn-ghost btn-sm btn-danger" aria-label="删除">
+                      <button onClick={() => setDeleteConfirmId(save.id)} className="btn btn-ghost btn-sm btn-danger" aria-label="删除">
                         <Trash width={16} height={16} />
                       </button>
                     </div>
+                    {deleteConfirmId === save.id && (
+                      <div className="flex items-center gap-2 mb-3 font-mono text-sm">
+                        <span className="text-[var(--ink-soft)]">确定删除？</span>
+                        <button onClick={() => handleDeleteSave(save.id)} className="btn btn-sm btn-coral">删除</button>
+                        <button onClick={() => setDeleteConfirmId(null)} className="btn btn-sm btn-outline">取消</button>
+                      </div>
+                    )}
                     <div className="grid grid-cols-3 gap-2">
-                      <button onClick={() => handleLoadSave(save)} className="btn btn-primary btn-sm">
-                        {save.isCompleted ? '重读' : '继续'}
+                      <button onClick={() => handleLoadSave(save)} disabled={!!pendingId} className="btn btn-primary btn-sm disabled:opacity-50 disabled:cursor-not-allowed">
+                        {pendingId === save.id ? '加载中…' : save.isCompleted ? '重读' : '继续'}
                       </button>
                       <button onClick={() => router.push(`/archive?id=${save.id}`)} className="btn btn-outline btn-sm">
                         回顾

@@ -1,11 +1,13 @@
 'use client';
 
-import { useEffect, useState, Suspense, useRef } from 'react';
+import { useEffect, useState, Suspense, useRef, useCallback } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { GameSave, EpilogueEntry, StoryArcReport } from '@/lib/types';
 import { loadSave } from '@/lib/storage';
 import { generateEpilogueBrowser, type EpilogueStreamState } from '@/lib/narrator-browser';
+import { createVitalsTracker, type StreamVitals } from '@/lib/stream_harness';
+import { StreamVitalsIndicator } from '@/components/StreamVitalsIndicator';
 import { speakerColor } from '@/components/NarrativeFeed';
 import { ArrowLeft, Book, Sparkles } from '@/components/Icons';
 
@@ -15,7 +17,20 @@ function EpilogueContent() {
   const saveId = searchParams.get('id');
   const shouldGenerate = searchParams.get('generating') === '1';
 
-  const { parsedStory, playerConfig, llmConfig, characterInteractions, narrativeHistory, completeGame } = useGameStore();
+  const { parsedStory, playerConfig, llmConfig, characterInteractions, narrativeHistory, completeGame, init } = useGameStore();
+
+  // Tracks whether init()'s async IDB hydration has actually settled. The
+  // store-level `_hydrated` flag is unusable for this — it defaults to true
+  // and never flips false (see gameStore initialState) — so we key off the
+  // promise init() returns instead.
+  const [hydrateSettled, setHydrateSettled] = useState(false);
+
+  // Hard refresh / direct navigation needs to drive the IDB hydration itself.
+  useEffect(() => {
+    let alive = true;
+    init().finally(() => { if (alive) setHydrateSettled(true); });
+    return () => { alive = false; };
+  }, [init]);
 
   const [data, setData] = useState<{
     save: GameSave | null;
@@ -24,9 +39,14 @@ function EpilogueContent() {
   }>({ save: null, epilogue: [] });
   const [visibleCount, setVisibleCount] = useState(0);
   const [streamState, setStreamState] = useState<EpilogueStreamState | null>(null);
+  const [genVitals, setGenVitals] = useState<StreamVitals | null>(null);
   const [generateError, setGenerateError] = useState<string | null>(null);
   const generationTriggered = useRef(false);
+  const abortRef = useRef<AbortController | null>(null);
   const { save, epilogue, storyArc } = data;
+
+  // Abort any in-flight epilogue generation when the component unmounts.
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -47,22 +67,33 @@ function EpilogueContent() {
     return () => { cancelled = true; };
   }, [saveId]);
 
-  useEffect(() => {
-    if (generationTriggered.current) return;
-    if (!shouldGenerate) return;
-    if (epilogue.length > 0) return;
-    if (!llmConfig || !parsedStory || !playerConfig) return;
-    if (narrativeHistory.length === 0) return;
+  const runGeneration = useCallback(async () => {
+    if (!llmConfig || !parsedStory || !playerConfig || narrativeHistory.length === 0) {
+      setGenerateError('生成所需的故事上下文已丢失，请回首页从存档重新进入');
+      return;
+    }
 
-    generationTriggered.current = true;
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     setGenerateError(null);
     setStreamState({ phase: 'arc', entries: [], expectedCount: 0 });
+
+    const tracker = createVitalsTracker({ onUpdate: setGenVitals });
 
     generateEpilogueBrowser(
       llmConfig, parsedStory, playerConfig,
       characterInteractions, narrativeHistory,
-      (state) => setStreamState(state),
+      (state) => {
+        setStreamState(state);
+        // Visible chars = sum of memoir text + (once present) the four arc
+        // segments. Lets the tracker tell "writing" from a silent long think.
+        let visible = state.entries.reduce((sum, e) => sum + (e.memoir?.length || 0), 0);
+        const arc = state.arcReport;
+        if (arc) visible += arc.qi.length + arc.cheng.length + arc.zhuan.length + arc.he.length;
+        tracker.noteVisible(visible);
+      },
+      { signal: ac.signal, onActivity: kind => kind === 'reasoning' ? tracker.noteThinking() : tracker.noteRaw() },
     )
       .then(result => {
         completeGame(result);
@@ -71,12 +102,41 @@ function EpilogueContent() {
         router.replace('/epilogue');
       })
       .catch(err => {
+        // Abort = the component unmounted / deliberately gave up; stay silent.
+        if (err instanceof DOMException && err.name === 'AbortError') return;
         console.error('生成后日谈失败:', err);
         setGenerateError(err instanceof Error ? err.message : '生成失败');
         setStreamState(null);
+      })
+      .finally(() => {
+        // Runs for success, error, AND AbortError — kill timers unconditionally,
+        // but only the still-current request may clear the shared vitals state
+        // (a retried/aborted run would otherwise blank its successor's vitals).
+        tracker.dispose();
+        if (abortRef.current === ac) setGenVitals(null);
       });
-  }, [shouldGenerate, epilogue.length, llmConfig, parsedStory, playerConfig,
-      narrativeHistory, characterInteractions, completeGame, router]);
+  }, [llmConfig, parsedStory, playerConfig, narrativeHistory, characterInteractions, completeGame, router]);
+
+  useEffect(() => {
+    if (generationTriggered.current) return;
+    if (!shouldGenerate) return;
+    if (epilogue.length > 0) return;
+
+    const hasContext = !!llmConfig && !!parsedStory && !!playerConfig && narrativeHistory.length > 0;
+    // Context missing: don't set the ref (hydration may still backfill it and
+    // re-run this effect). Only surface the loss once hydration has settled,
+    // so the error doesn't flicker while IDB is still rehydrating.
+    if (!hasContext) {
+      // Defer out of the effect body: runGeneration() surfaces the
+      // lost-context error synchronously, which would cascade renders.
+      if (hydrateSettled) queueMicrotask(runGeneration);
+      return;
+    }
+
+    generationTriggered.current = true;
+    queueMicrotask(runGeneration);
+  }, [shouldGenerate, epilogue.length, hydrateSettled, llmConfig, parsedStory,
+      playerConfig, narrativeHistory, runGeneration]);
 
   useEffect(() => {
     if (epilogue.length > 0 && visibleCount < epilogue.length) {
@@ -137,7 +197,7 @@ function EpilogueContent() {
 
         {/* 生成进度 */}
         {isGenerating && streamState && (
-          <EpilogueProgress state={streamState} />
+          <EpilogueProgress state={streamState} vitals={genVitals} />
         )}
 
         {/* 故事弧摘要（旅程总结）——一旦 arcReport 出现就开始展示，
@@ -153,9 +213,8 @@ function EpilogueContent() {
             <div className="flex gap-2">
               <button
                 onClick={() => {
-                  generationTriggered.current = false;
                   setGenerateError(null);
-                  router.replace('/epilogue?generating=1');
+                  runGeneration();
                 }}
                 className="btn btn-primary btn-sm">重试</button>
               <button onClick={() => router.push('/')} className="btn btn-ghost btn-sm">返回首页</button>
@@ -253,7 +312,7 @@ function EpilogueContent() {
   );
 }
 
-function EpilogueProgress({ state }: { state: EpilogueStreamState }) {
+function EpilogueProgress({ state, vitals }: { state: EpilogueStreamState; vitals?: StreamVitals | null }) {
   // Arc phase: show an indeterminate "正在做旅程总结" placeholder with a
   // pulsing 25% bar so the user knows something's happening.
   if (state.phase === 'arc') {
@@ -276,6 +335,9 @@ function EpilogueProgress({ state }: { state: EpilogueStreamState }) {
         <p className="text-[11px] text-[var(--ink-muted)] mt-2 font-mono">
           {'// 把这场独有的旅程压缩成"起 / 承 / 转 / 合"四段式'}
         </p>
+        <div className="mt-3">
+          <StreamVitalsIndicator vitals={vitals ?? null} busyLabel="正在为旅程做总结" />
+        </div>
       </div>
     );
   }
@@ -308,6 +370,12 @@ function EpilogueProgress({ state }: { state: EpilogueStreamState }) {
       <p className="text-[11px] text-[var(--ink-muted)] mt-2 font-mono">
         {'// 与玩家有 ≥5 轮交集且情感强度足够的角色，以第一人称写下回忆'}
       </p>
+      {/* 仅在流中断 / 角色间隙陷入长思考时露出指示器，避免与 % 进度条信息重复。 */}
+      {(vitals?.phase === 'thinking' || vitals?.phase === 'stalled') && (
+        <div className="mt-3">
+          <StreamVitalsIndicator vitals={vitals} busyLabel="正在召唤下一位角色的回忆" />
+        </div>
+      )}
     </div>
   );
 }

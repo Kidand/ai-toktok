@@ -1,6 +1,6 @@
 /** 浏览器端叙事生成 - 直接调用 LLM API */
 
-import { callLLMBrowser, streamLLMBrowser } from './llm-browser';
+import { callLLMBrowser, streamLLMBrowser, type LLMStreamActivity } from './llm-browser';
 import {
   buildWorldSystemPrompt as buildWorldSystemPromptTpl,
   buildHistoryContext,
@@ -22,6 +22,22 @@ import {
   CharacterInteraction, StoryArcStats, StoryArcReport, EpilogueEntry,
 } from './types';
 import { v4 as uuid } from 'uuid';
+import {
+  stripThinking,
+  type StreamingState, type StreamingDialogue,
+} from './llm-text';
+import {
+  isProtocolResponse,
+  extractProtocolStreamingState,
+  parseProtocolFinal,
+  type ProtocolBlock,
+} from './narration_protocol';
+
+// Re-export so existing importers (parser-client, agent_factory, dialogue_
+// orchestrator, NarrativeFeed, play/page, …) keep importing from here. The
+// definitions themselves now live in ./llm-text to break the require-cycle
+// with narration_protocol.
+export { stripThinking, type StreamingState, type StreamingDialogue };
 
 export const DEFAULT_INJECTION_CONFIG: InjectionConfig = {
   mode: 'smart',
@@ -228,33 +244,6 @@ function buildWorldSystemPrompt(
 }
 
 /**
- * Strip reasoning-model thinking prefixes from a response buffer.
- *
- * Reasoning-capable models served through OpenAI-compatible endpoints
- * (DeepSeek-R1, MiniMax-M2, some Qwen/GLM tunes) often mix their chain-of-
- * thought into the primary content stream, typically wrapped in
- * `<think>...</think>` or `<thinking>...</thinking>` tags. That scrambles
- * our JSON parsing.
- *
- * This helper removes:
- *   - any complete `<think>…</think>` / `<thinking>…</thinking>` blocks
- *   - any trailing unclosed `<think(...)` — mid-stream, thinking is still
- *     being written and nothing after it is the real answer yet, so drop
- *     from the opening tag onward
- *
- * Case-insensitive. Safe to call on a partial buffer (streaming) or on a
- * completed response.
- */
-export function stripThinking(buffer: string): string {
-  // Complete blocks — greedy removal
-  let out = buffer.replace(/<think(?:ing)?\b[^>]*>[\s\S]*?<\/think(?:ing)?>/gi, '');
-  // Unclosed trailing block — chop from the opener
-  const open = out.match(/<think(?:ing)?\b[^>]*>/i);
-  if (open && open.index !== undefined) out = out.slice(0, open.index);
-  return out;
-}
-
-/**
  * Find the first balanced JSON value (object or array) inside a buffer,
  * ignoring any preamble / trailing prose. Returns null if no balanced value
  * is present yet. Handles string literals and escapes so braces inside
@@ -324,12 +313,6 @@ function decodePartialJSONString(buffer: string, start: number): { value: string
   return { value: out, endIdx: i };
 }
 
-export type StreamingDialogue = { speaker: string; content: string; partial?: boolean };
-export type StreamingState = {
-  narration: string;
-  dialogues: StreamingDialogue[];
-};
-
 /**
  * Scan a buffer position for a balanced JSON object `{...}`. Returns the
  * parsed object and the index just after `}` if complete, or null if the
@@ -383,12 +366,26 @@ function extractPartialDialogue(buffer: string, objStart: number): StreamingDial
 }
 
 /**
- * Extract narration + all dialogues (completed + partial last) from a
- * streaming JSON buffer. Designed for incremental UI rendering.
+ * Streaming extraction dispatcher. After stripping thinking once, route to the
+ * directive-line protocol parser when the buffer looks like a protocol
+ * response, otherwise fall back to the legacy JSON extractor (unchanged).
+ *
+ * The protocol parser strips thinking again internally — harmless: stripThinking
+ * is idempotent on already-clean text, so there's no double-clean hazard and no
+ * missed strip.
  */
 export function extractStreamingState(buffer: string): StreamingState {
-  // Work on a thinking-stripped view so reasoning-model prose never leaks.
   const cleaned = stripThinking(buffer);
+  if (isProtocolResponse(cleaned)) return extractProtocolStreamingState(cleaned);
+  return extractStreamingStateJSON(cleaned);
+}
+
+/**
+ * Legacy JSON streaming extractor. Operates on an ALREADY thinking-stripped
+ * buffer (the dispatcher strips once before routing). Logic unchanged from the
+ * original `extractStreamingState`.
+ */
+function extractStreamingStateJSON(cleaned: string): StreamingState {
   const narration = (() => {
     const keyMatch = cleaned.match(/"narration"\s*:\s*"/);
     if (!keyMatch || keyMatch.index === undefined) return '';
@@ -436,7 +433,7 @@ export function extractStreamingState(buffer: string): StreamingState {
  * Anything fancier (re-balancing braces, stripping mid-string newlines)
  * is too risky and is left to the streaming-state fallback below.
  */
-function sanitizeLikelyJSON(jsonStr: string): string {
+export function sanitizeLikelyJSON(jsonStr: string): string {
   return jsonStr
     .replace(/([{,]\s*)"([a-zA-Z_$][\w$]*?):\s+/g, '$1"$2": ')
     .replace(/,(\s*[\]}])/g, '$1');
@@ -456,8 +453,11 @@ function recoverFromMalformedJSON(buffer: string): {
   choices: { text: string; isBranchPoint: boolean }[];
   interactions: { characterName: string; event: string; reaction: string; sentiment: string }[];
 } {
-  const state = extractStreamingState(buffer);
-  // extractStreamingState already drops a partial trailing dialogue when
+  // This is the JSON-only salvage path; `buffer` is already thinking-stripped
+  // (passed as `cleaned` from parseNarrationResponse). Use the JSON extractor
+  // directly so we don't re-route through protocol detection.
+  const state = extractStreamingStateJSON(buffer);
+  // extractStreamingStateJSON already drops a partial trailing dialogue when
   // it can't be parsed; we just need the completed ones for the final
   // result. Filter out objects flagged `partial`.
   const dialogues = state.dialogues
@@ -554,10 +554,89 @@ function findClosingBrace(buffer: string, start: number): number {
   return -1;
 }
 
-/** Parse raw LLM JSON response into structured entries */
+/** The structured four-tuple both parse paths (protocol + JSON) converge on. */
+type ParsedNarration = {
+  narration?: string;
+  dialogues?: { speaker: string; content: string }[];
+  choices?: { text: string; isBranchPoint: boolean }[];
+  interactions?: { characterName: string; event: string; reaction: string; sentiment: string }[];
+  /**
+   * Document-ordered blocks (protocol path only). When present they take
+   * precedence over narration/dialogues for entry assembly, so interleaved
+   * narration↔dialogue sequences keep their original order instead of all
+   * narration being merged above the dialogue.
+   */
+  blocks?: ProtocolBlock[];
+};
+
+type AssembledInteraction = {
+  characterId: string;
+  characterName: string;
+  interactions: { event: string; playerAction: string; characterReaction: string; sentiment: 'positive' | 'neutral' | 'negative' }[];
+};
+
+/**
+ * Shared assembly: turn the parsed four-tuple (from either the protocol parser
+ * or the JSON path) into NarrativeEntries + choices (attached to the last
+ * entry) + interactions matched against `story.characters`.
+ *
+ * `failed` is true iff no entry was produced — narration empty AND no
+ * dialogues. Callers surface this as a clean retry rather than inventing a
+ * fake "生成异常" narration entry.
+ */
+function assembleNarration(
+  parsed: ParsedNarration, story: ParsedStory, playerInput: string,
+): { entries: NarrativeEntry[]; interactions: AssembledInteraction[]; failed: boolean } {
+  const entries: NarrativeEntry[] = [];
+  if (parsed.blocks && parsed.blocks.length > 0) {
+    // Protocol path: build entries in document order so narration written
+    // after a dialogue stays after it.
+    for (const b of parsed.blocks) {
+      entries.push(b.type === 'narration'
+        ? { id: uuid(), type: 'narration', content: b.content, timestamp: Date.now() }
+        : { id: uuid(), type: 'dialogue', speaker: b.speaker, content: b.content, timestamp: Date.now() });
+    }
+  } else {
+    if (parsed.narration) entries.push({ id: uuid(), type: 'narration', content: parsed.narration, timestamp: Date.now() });
+    for (const d of parsed.dialogues || []) {
+      entries.push({ id: uuid(), type: 'dialogue', speaker: d.speaker, content: d.content, timestamp: Date.now() });
+    }
+  }
+  const choices: StoryChoice[] = (parsed.choices || []).map(c => ({ id: uuid(), text: c.text, isBranchPoint: c.isBranchPoint }));
+  if (entries.length > 0 && choices.length > 0) entries[entries.length - 1].choices = choices;
+
+  // Clean failure: nothing usable came back. Don't fabricate a placeholder
+  // narration entry — let the caller offer a retry instead.
+  if (entries.length === 0) {
+    return { entries: [], interactions: [], failed: true };
+  }
+
+  const interactions = (parsed.interactions || []).map(inter => {
+    const char = story.characters.find(c => c.name === inter.characterName);
+    return char ? {
+      characterId: char.id, characterName: char.name,
+      interactions: [{ event: inter.event, playerAction: playerInput, characterReaction: inter.reaction, sentiment: inter.sentiment as 'positive' | 'neutral' | 'negative' }],
+    } : null;
+  }).filter(Boolean) as AssembledInteraction[];
+
+  return { entries, interactions, failed: false };
+}
+
+/**
+ * Parse a raw LLM narration response into structured entries. Dual-path: after
+ * stripping thinking once, a directive-line protocol response goes through
+ * parseProtocolFinal; everything else takes the legacy three-tier JSON rescue
+ * (strict → sanitized → field-by-field salvage). Both converge on
+ * assembleNarration. Returns `{ entries, interactions, failed }`.
+ */
 export function parseNarrationResponse(raw: string, story: ParsedStory, playerInput: string) {
   // Reasoning-model safety: strip thinking wrappers first.
   const cleaned = stripThinking(raw);
+
+  if (isProtocolResponse(cleaned)) {
+    const final = parseProtocolFinal(cleaned);
+    return assembleNarration(final, story, playerInput);
+  }
 
   // Prefer explicit ```json fences, then fall back to 'first balanced JSON
   // value in the buffer' (handles untagged preambles/outros), then last-
@@ -570,20 +649,13 @@ export function parseNarrationResponse(raw: string, story: ParsedStory, playerIn
     if (balanced) jsonStr = balanced;
   }
 
-  type Parsed = {
-    narration?: string;
-    dialogues?: { speaker: string; content: string }[];
-    choices?: { text: string; isBranchPoint: boolean }[];
-    interactions?: { characterName: string; event: string; reaction: string; sentiment: string }[];
-  };
-
   // Three-tier parse: strict → sanitized → field-by-field salvage.
-  let parsed: Parsed | null = null;
+  let parsed: ParsedNarration | null = null;
   try {
-    parsed = JSON.parse(jsonStr) as Parsed;
+    parsed = JSON.parse(jsonStr) as ParsedNarration;
   } catch {
     try {
-      parsed = JSON.parse(sanitizeLikelyJSON(jsonStr)) as Parsed;
+      parsed = JSON.parse(sanitizeLikelyJSON(jsonStr)) as ParsedNarration;
     } catch {
       const recovered = recoverFromMalformedJSON(cleaned);
       // Surface the failure in dev tools so the model behaviour can be
@@ -596,37 +668,7 @@ export function parseNarrationResponse(raw: string, story: ParsedStory, playerIn
     }
   }
 
-  const entries: NarrativeEntry[] = [];
-  if (parsed.narration) entries.push({ id: uuid(), type: 'narration', content: parsed.narration, timestamp: Date.now() });
-  for (const d of parsed.dialogues || []) {
-    entries.push({ id: uuid(), type: 'dialogue', speaker: d.speaker, content: d.content, timestamp: Date.now() });
-  }
-  const choices: StoryChoice[] = (parsed.choices || []).map(c => ({ id: uuid(), text: c.text, isBranchPoint: c.isBranchPoint }));
-  if (entries.length > 0 && choices.length > 0) entries[entries.length - 1].choices = choices;
-
-  // If salvage produced nothing usable AT ALL, give the player a minimal
-  // recovery option so the story isn't soft-locked.
-  if (entries.length === 0) {
-    entries.push({
-      id: uuid(), type: 'narration',
-      content: '（本轮叙事生成异常，请尝试新的输入或选择）',
-      timestamp: Date.now(),
-      choices: [
-        { id: uuid(), text: '继续观察', isBranchPoint: false },
-        { id: uuid(), text: '与附近的人交谈', isBranchPoint: false },
-      ],
-    });
-  }
-
-  const interactions = (parsed.interactions || []).map(inter => {
-    const char = story.characters.find(c => c.name === inter.characterName);
-    return char ? {
-      characterId: char.id, characterName: char.name,
-      interactions: [{ event: inter.event, playerAction: playerInput, characterReaction: inter.reaction, sentiment: inter.sentiment as 'positive' | 'neutral' | 'negative' }],
-    } : null;
-  }).filter(Boolean);
-
-  return { entries, interactions };
+  return assembleNarration(parsed, story, playerInput);
 }
 
 /**
@@ -640,11 +682,14 @@ export async function systemHintBrowser(
   playerConfig: PlayerConfig,
   history: NarrativeEntry[],
   question: string,
+  opts?: { signal?: AbortSignal; onActivity?: (kind: LLMStreamActivity) => void },
 ): Promise<string> {
   const systemPrompt = buildSystemHintPrompt(story, playerConfig, history);
   const answer = await callLLMBrowser(config, systemPrompt, question, {
     temperature: 0.5,
     maxTokens: 400,
+    signal: opts?.signal,
+    onActivity: opts?.onActivity,
   });
   // Reasoning models may wrap their thought process in <think>…</think>.
   // The system hint is plain text for the UI — strip any such block before
@@ -670,6 +715,7 @@ export async function streamNarrationBrowser(
   mentionedCharacterNames?: string[],
   fromChoice?: boolean,
   injectionConfig: InjectionConfig = DEFAULT_INJECTION_CONFIG,
+  opts?: { signal?: AbortSignal; onActivity?: (kind: LLMStreamActivity) => void },
 ): Promise<string> {
   const playerChar = playerConfig.entryMode === 'soul-transfer'
     ? story.characters.find(c => c.id === playerConfig.characterId)
@@ -705,11 +751,22 @@ export async function streamNarrationBrowser(
 
   let full = '';
   let lastSignature = '';
+  // Time-throttle the streaming extraction: extractStreamingState rescans the
+  // whole buffer, so running it per token is O(n²) on long outputs. Skip the
+  // extraction when <80ms have elapsed since the last one (still accumulating
+  // `full`); the caller does a final parseNarrationResponse so no end-of-loop
+  // catch-up extraction is needed.
+  let lastExtractAt = 0;
   for await (const token of streamLLMBrowser(config, systemPrompt, userMessage, {
     temperature: 0.3 + guardrail.temperature * 0.7,
     maxTokens: 4096,
+    signal: opts?.signal,
+    onActivity: opts?.onActivity,
   })) {
     full += token;
+    const now = Date.now();
+    if (now - lastExtractAt < 80) continue;
+    lastExtractAt = now;
     const state = extractStreamingState(full);
     const sig = signatureOf(state);
     if (sig !== lastSignature) {
@@ -869,6 +926,30 @@ const MAIN_CHARACTER_INTERSECTION_MIN = 5;
 const MAIN_CHARACTER_SENTIMENT_MIN = 1;
 
 /**
+ * Whether `name` appears in `text`. For names ≥2 chars a plain `includes`
+ * is precise enough — Chinese prose has no word separators, so a flanking
+ * check on a 2-char name (林冲、黛玉) would reject virtually every real
+ * occurrence. Only single-char names (e.g. 「白」) need the boundary test,
+ * since a bare substring match would false-positive inside longer words
+ * ("白宫"): we require the chars flanking the match to NOT be CJK / letters /
+ * digits — i.e. the single-char name must stand on its own.
+ */
+function nameAppears(text: string, name: string): boolean {
+  if (!name) return false;
+  if (name.length >= 2) return text.includes(name);
+  const boundary = /[\p{Script=Han}A-Za-z0-9]/u;
+  let from = 0;
+  for (;;) {
+    const idx = text.indexOf(name, from);
+    if (idx < 0) return false;
+    const before = idx > 0 ? text[idx - 1] : '';
+    const after = idx + name.length < text.length ? text[idx + name.length] : '';
+    if (!boundary.test(before) && !boundary.test(after)) return true;
+    from = idx + 1;
+  }
+}
+
+/**
  * Pure derivation of the four blueprint-mandated stats: locations
  * visited, dialogue characters, group-scene count, relationship shifts.
  * Plus a `totalTurns` for the chip layout. No LLM involved.
@@ -886,7 +967,7 @@ export function computeStoryArcStats(
   for (const e of history) {
     if (!e.content) continue;
     for (const loc of story.locations) {
-      if (loc.name && e.content.includes(loc.name)) locationsSeen.add(loc.id);
+      if (loc.name && nameAppears(e.content, loc.name)) locationsSeen.add(loc.id);
     }
   }
 
@@ -914,7 +995,7 @@ export function computeStoryArcStats(
       if (e.speaker !== playerName) scenePeople.add(e.speaker);
     } else if (e.type === 'narration' && e.content) {
       for (const c of story.characters) {
-        if (c.name && e.content.includes(c.name)) scenePeople.add(c.name);
+        if (c.name && nameAppears(e.content, c.name)) scenePeople.add(c.name);
       }
     }
   }
@@ -949,6 +1030,7 @@ export async function generateStoryArc(
   playerConfig: PlayerConfig,
   characterInteractions: CharacterInteraction[],
   narrativeHistory: NarrativeEntry[],
+  opts?: { signal?: AbortSignal; onActivity?: (kind: LLMStreamActivity) => void },
 ): Promise<StoryArcReport> {
   const playerChar = playerConfig.entryMode === 'soul-transfer'
     ? story.characters.find(c => c.id === playerConfig.characterId)
@@ -973,7 +1055,7 @@ export async function generateStoryArc(
 
   const raw = await callLLMBrowser(
     config, STORY_ARC_SYSTEM_PROMPT, userMessage,
-    { temperature: 0.5, maxTokens: 1500 },
+    { temperature: 0.5, maxTokens: 1500, signal: opts?.signal, onActivity: opts?.onActivity },
   );
   const cleaned = stripThinking(raw);
   let jsonStr = cleaned.trim();
@@ -1018,6 +1100,7 @@ export async function generateEpilogueBrowser(
   characterInteractions: CharacterInteraction[],
   narrativeHistory: NarrativeEntry[],
   onProgress?: (state: EpilogueStreamState) => void,
+  opts?: { signal?: AbortSignal; onActivity?: (kind: LLMStreamActivity) => void },
 ): Promise<EpilogueResult> {
   const playerChar = playerConfig.entryMode === 'soul-transfer'
     ? story.characters.find(c => c.id === playerConfig.characterId)
@@ -1034,7 +1117,7 @@ export async function generateEpilogueBrowser(
   let storyArc: StoryArcReport | undefined;
   try {
     storyArc = await generateStoryArc(
-      config, story, playerConfig, characterInteractions, narrativeHistory,
+      config, story, playerConfig, characterInteractions, narrativeHistory, opts,
     );
   } catch (err) {
     console.warn('[epilogue] story arc generation failed; continuing with stats only', err);
@@ -1123,9 +1206,13 @@ ${interactionLog}`;
   let full = '';
   let lastSig = '';
   if (onProgress) onProgress({ phase: 'memoirs', arcReport: storyArc, entries: [], expectedCount });
+  // 每位回忆约 200-400 字中文 ≈ 400-700 token；按参与者数动态放宽预算，封顶 8192。
+  const memoirsMaxTokens = Math.min(8192, Math.max(4096, expectedCount * 700));
   for await (const token of streamLLMBrowser(config, systemPrompt, userMessage, {
     temperature: 0.7,
-    maxTokens: 4096,
+    maxTokens: memoirsMaxTokens,
+    signal: opts?.signal,
+    onActivity: opts?.onActivity,
   })) {
     full += token;
     if (onProgress) {
@@ -1172,8 +1259,13 @@ ${interactionLog}`;
  *    when participants list has "沃尔特·怀特"). We do bidirectional
  *    `includes` matching to catch this.
  * 2. The model reorders the array. We honour its ordering only if names
- *    matched cleanly; when a name is unmatched we **fall back to positional
- *    alignment** so a still-readable memoir doesn't get dropped.
+ *    matched cleanly; positional fallback for unmatched entries is applied
+ *    **only when the number of unmatched slots exactly equals the number of
+ *    unassigned participants** — a strong signal the model merely reordered
+ *    or renamed every remaining participant. Otherwise positional alignment
+ *    risks mis-attributing one character's memoir to another, so unmatched
+ *    slots keep an empty participantId and the model's original name (the UI
+ *    renders arbitrary names fine).
  * 3. The model skips a participant or duplicates one. Skipped participants
  *    surface with an empty memoir (so the UI can show "（未留下回忆）"
  *    instead of silently disappearing).
@@ -1226,16 +1318,24 @@ function reconcileEpilogueWithParticipants(
     };
   });
 
-  // Second pass: positional alignment for unmatched entries.
+  // Second pass: positional alignment for unmatched entries — but only when
+  // the unmatched slot count exactly equals the unassigned participant count.
+  // That equality is the strong signal that the model just reordered/renamed
+  // the remaining participants; absent it, positional pairing would risk
+  // attributing one character's memoir to another, so we leave such slots
+  // unassigned (empty participantId, model's original name preserved).
   const unassignedParticipants = participants.filter(p => !usedParticipantIds.has(p.id));
-  let unassignedCursor = 0;
-  for (const slot of slots) {
-    if (slot.participantId) continue;
-    const fallback = unassignedParticipants[unassignedCursor++];
-    if (fallback) {
-      slot.participantId = fallback.id;
-      slot.characterName = fallback.name;
-      slot.matchedBy = 'positional';
+  const unmatchedSlots = slots.filter(s => s.matchedBy === 'none');
+  if (unmatchedSlots.length === unassignedParticipants.length) {
+    let unassignedCursor = 0;
+    for (const slot of slots) {
+      if (slot.participantId) continue;
+      const fallback = unassignedParticipants[unassignedCursor++];
+      if (fallback) {
+        slot.participantId = fallback.id;
+        slot.characterName = fallback.name;
+        slot.matchedBy = 'positional';
+      }
     }
   }
 
@@ -1269,10 +1369,10 @@ function reconcileEpilogueWithParticipants(
 }
 
 /** Generate reincarnation character (non-streaming) */
-export async function generateReincarnationBrowser(config: LLMConfig, story: ParsedStory) {
+export async function generateReincarnationBrowser(config: LLMConfig, story: ParsedStory, opts?: { signal?: AbortSignal; onActivity?: (kind: LLMStreamActivity) => void }) {
   const systemPrompt = REINCARNATION_SYSTEM_PROMPT;
   const worldInfo = buildReincarnationUserMessage(story);
-  const response = await callLLMBrowser(config, systemPrompt, worldInfo, { temperature: 0.8 });
+  const response = await callLLMBrowser(config, systemPrompt, worldInfo, { temperature: 0.8, signal: opts?.signal, onActivity: opts?.onActivity });
   const cleaned = stripThinking(response);
   let jsonStr = cleaned.trim();
   const m = cleaned.match(/```(?:json)?\s*([\s\S]*?)```/);

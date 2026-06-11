@@ -8,7 +8,7 @@ import {
 import {
   saveSave, loadSave, loadAllSaves, deleteSave,
   saveLLMConfig, loadLLMConfig,
-  saveStory, loadStory,
+  saveStory, loadStory, deleteStory,
   migrateLegacyStorage,
 } from '@/lib/storage';
 import { v4 as uuid } from 'uuid';
@@ -409,8 +409,24 @@ export const useGameStore = create<GameState & GameActions>()(
       },
 
       removeSave: async (saveId) => {
+        const targetSave = get().saves.find(sv => sv.id === saveId);
         await deleteSave(saveId);
         set((s) => ({ saves: s.saves.filter(sv => sv.id !== saveId) }));
+        // Garbage-collect the story body once nothing points at it anymore.
+        // Keep it if another save references it, OR if it's the story loaded
+        // in the current session (lastStoryId / in-memory parsedStory) — the
+        // active session would otherwise lose its IDB body and fail to
+        // rehydrate on the next hard refresh.
+        if (targetSave) {
+          const s = get();
+          const stillReferenced = s.saves.some(sv => sv.storyId === targetSave.storyId)
+            || s.lastStoryId === targetSave.storyId
+            || s.parsedStory?.id === targetSave.storyId;
+          if (!stillReferenced) {
+            deleteStory(targetSave.storyId).catch(err =>
+              console.warn('[storage] deleteStory after removeSave failed:', err));
+          }
+        }
       },
 
       resetGame: () => set({

@@ -101,7 +101,7 @@ function ArchiveContent() {
                   <div key={ci.characterId} className="p-3 border-[2px] border-[var(--ink)] bg-[var(--paper-raised)]" style={{ borderRadius: 'var(--radius-xs)' }}>
                     <div className="flex items-center justify-between mb-2">
                       <div className="flex items-center gap-2 min-w-0">
-                        <div className="avatar avatar-sm" data-speaker-color={speakerColor(ci.characterName)}>{ci.characterName[0]}</div>
+                        <div className="avatar avatar-sm" data-speaker-color={speakerColor(ci.characterName || '')}>{ci.characterName?.[0] || '?'}</div>
                         <span className="font-sans font-bold truncate">{ci.characterName}</span>
                       </div>
                       <span className="text-xs font-mono text-[var(--ink-muted)] shrink-0">{ci.interactions.length} 次</span>

@@ -285,6 +285,7 @@ export const MentionInput = forwardRef<MentionInputHandle, Props>(function Menti
       if (e.key === 'ArrowDown') { e.preventDefault(); setSelectedIdx(i => nextSelectable(i, 1)); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setSelectedIdx(i => nextSelectable(i, -1)); return; }
       if (e.key === 'Enter' || e.key === 'Tab') {
+        if (isComposingRef.current || e.nativeEvent.isComposing) return;
         if (filtered.length > 0 && filtered[selectedIdx]?.interactable) {
           e.preventDefault();
           insertMention(filtered[selectedIdx]);

@@ -98,7 +98,7 @@ export async function applyStateDelta(
         row = {
           id: uuid(), projectId,
           sourceEntityId: src, targetEntityId: tgt,
-          relationType: change.reason || '互动',
+          relationType: '互动中建立',
           polarity: 0, strength: 0,
         };
         story.relationships.push(row);

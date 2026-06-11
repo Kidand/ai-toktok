@@ -1,11 +1,13 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { EntryMode, Character } from '@/lib/types';
 import { v4 as uuid } from 'uuid';
 import { generateReincarnationBrowser } from '@/lib/narrator-browser';
+import { createVitalsTracker, type StreamVitals } from '@/lib/stream_harness';
+import { StreamVitalsIndicator } from '@/components/StreamVitalsIndicator';
 import { speakerColor } from '@/components/NarrativeFeed';
 import { ArrowLeft, Users, Wand, Spinner, Refresh, Play } from '@/components/Icons';
 
@@ -26,10 +28,18 @@ export default function SetupPage() {
   const [selectedCharId, setSelectedCharId] = useState('');
   const [entryEventIndex, setEntryEventIndex] = useState(0);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [reincVitals, setReincVitals] = useState<StreamVitals | null>(null);
+  const [genError, setGenError] = useState<string | null>(null);
   const [reincarnation, setReincarnation] = useState<Character | null>(null);
   const [temperature, setTemperature] = useState(guardrailParams.temperature);
   const [strictness, setStrictness] = useState(guardrailParams.strictness);
   const [narrativeWeight, setNarrativeWeight] = useState(narrativeBalance.narrativeWeight);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Abort any in-flight reincarnation generation when the component unmounts —
+  // otherwise the request runs to completion and the vitals tracker keeps
+  // setState-ing an unmounted component for its whole duration.
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
 
   if (!parsedStory) {
     return (
@@ -43,10 +53,21 @@ export default function SetupPage() {
   }
 
   const handleGenerateReincarnation = async () => {
-    if (!llmConfig || !parsedStory) return;
+    if (!llmConfig || !parsedStory) {
+      setGenError('尚未配置 AI 引擎，请回首页填写 API 密钥');
+      return;
+    }
     setIsGenerating(true);
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    const tracker = createVitalsTracker({ onUpdate: setReincVitals });
     try {
-      const data = await generateReincarnationBrowser(llmConfig, parsedStory);
+      setGenError(null);
+      const data = await generateReincarnationBrowser(llmConfig, parsedStory, {
+        signal: ac.signal,
+        onActivity: kind => kind === 'reasoning' ? tracker.noteThinking() : tracker.noteRaw(),
+      });
       // Map LLM-emitted target names back to canonical character ids so the
       // relationships are renderable by /characters and the relation graph.
       // The legacy embedding (`Character.relationships`) only carries the
@@ -80,8 +101,13 @@ export default function SetupPage() {
         isOriginal: false,
       });
     } catch (err) {
+      // Abort = 用户离开页面/重新生成，静默即可。
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       console.error('生成转生角色失败:', err);
+      setGenError(err instanceof Error ? err.message : '生成失败，请重试');
     } finally {
+      tracker.dispose();
+      setReincVitals(null);
       setIsGenerating(false);
     }
   };
@@ -204,6 +230,9 @@ export default function SetupPage() {
                       <Spinner className="mx-auto mb-3" style={{ color: 'var(--ink)' }} width={28} height={28} />
                       <p className="font-sans font-bold">正在生成角色...</p>
                       <p className="text-xs text-[var(--ink-muted)] mt-1 font-mono">AI 正在构思与世界观契合的新角色</p>
+                      <div className="mt-3">
+                        <StreamVitalsIndicator vitals={reincVitals} busyLabel="正在构思角色" />
+                      </div>
                     </>
                   ) : (
                     <>
@@ -213,6 +242,13 @@ export default function SetupPage() {
                     </>
                   )}
                 </button>
+              )}
+              {genError && !isGenerating && (
+                <div className="surface p-3 mt-3" style={{ boxShadow: '3px 3px 0 var(--hi-coral)' }}>
+                  <div className="label-mono text-[10px] mb-1 text-[var(--hi-coral)]">FAILED</div>
+                  <p className="font-mono text-xs">{genError}</p>
+                  <button onClick={handleGenerateReincarnation} className="btn btn-outline btn-sm mt-2">重试</button>
+                </div>
               )}
             </div>
           )}

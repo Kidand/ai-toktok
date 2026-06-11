@@ -71,16 +71,48 @@ export function selectResponders(input: ResponderSelectionInput): ResponderSelec
   // 3. Anyone in scene who hasn't been picked yet.
   for (const id of presentSet) add(id, 'present');
 
-  // 4. As a last resort, characters whose goals match player input
-  //    keywords (very crude — overlap test on goal phrases).
+  // 4. As a last resort, characters whose goals match player input.
+  //    Bigram overlap (≥2 shared bigrams) works for both Chinese and English:
+  //    avoids the substring false-matches that prefix-slice caused, and is
+  //    case-insensitive by construction.
   if (ids.length < max) {
-    const inputLower = input.playerInput.toLowerCase();
+    const inputBigrams = toBigrams(input.playerInput);
     for (const a of input.agents) {
       if (ids.includes(a.id)) continue;
-      const hit = (a.goals || []).some(g => inputLower.includes(g.slice(0, 4)));
+      const hit = (a.goals || []).some(g => goalMatchesBigrams(g, inputBigrams));
       if (hit) add(a.id, 'goal');
     }
   }
 
   return { ids, names, reasons };
+}
+
+/** Extract character bigrams from text after stripping punctuation/whitespace. */
+function toBigrams(text: string): Set<string> {
+  const chars = text.toLowerCase().replace(/[\s\p{P}]/gu, '');
+  const set = new Set<string>();
+  for (let i = 0; i + 1 < chars.length; i++) {
+    set.add(chars[i] + chars[i + 1]);
+  }
+  return set;
+}
+
+/**
+ * Return true when goal shares enough bigrams with the precomputed input
+ * bigram set. Short goals (≤3 net chars, e.g. 「复仇」) only yield 1-2
+ * bigrams, so requiring 2 shared would make them unmatchable — they pass
+ * with a single shared bigram instead.
+ */
+function goalMatchesBigrams(goal: string, inputBigrams: Set<string>): boolean {
+  const goalChars = goal.toLowerCase().replace(/[\s\p{P}]/gu, '');
+  if (goalChars.length < 2) return false;
+  const required = goalChars.length <= 3 ? 1 : 2;
+  let shared = 0;
+  for (let i = 0; i + 1 < goalChars.length; i++) {
+    if (inputBigrams.has(goalChars[i] + goalChars[i + 1])) {
+      shared++;
+      if (shared >= required) return true;
+    }
+  }
+  return false;
 }

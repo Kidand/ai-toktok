@@ -1,5 +1,7 @@
 import { NarrativeEntry } from '@/lib/types';
 import type { StreamingDialogue } from '@/lib/narrator-browser';
+import type { StreamVitals } from '@/lib/stream_harness';
+import { StreamVitalsIndicator } from '@/components/StreamVitalsIndicator';
 
 type Props = {
   entries: NarrativeEntry[];
@@ -7,6 +9,8 @@ type Props = {
   streamingNarration?: string;
   streamingDialogues?: StreamingDialogue[];
   isGenerating?: boolean;
+  vitals?: StreamVitals | null;
+  onCancelStream?: () => void;
 };
 
 /**
@@ -28,6 +32,7 @@ type Props = {
  */
 export function NarrativeFeed({
   entries, playerName, streamingNarration, streamingDialogues, isGenerating,
+  vitals, onCancelStream,
 }: Props) {
   const turns = groupIntoTurns(entries);
 
@@ -58,7 +63,7 @@ export function NarrativeFeed({
 
           {!hasStreaming && (
             <div className="prose-story">
-              <span className="typing-cursor">正在书写</span>
+              <StreamVitalsIndicator vitals={vitals ?? null} busyLabel="正在书写" onCancel={onCancelStream} />
             </div>
           )}
 
@@ -92,6 +97,14 @@ export function NarrativeFeed({
               />
             );
           })}
+
+          {/* 流中途模型又陷入思考/卡住：已有可见内容，但 vitals 退回 thinking/stalled，
+              在已渲染内容下方补一行指示器，告诉用户「还在动」。 */}
+          {hasStreaming && (vitals?.phase === 'thinking' || vitals?.phase === 'stalled') && (
+            <div className="mt-2">
+              <StreamVitalsIndicator vitals={vitals} busyLabel="正在书写" onCancel={onCancelStream} />
+            </div>
+          )}
         </div>
       )}
     </div>

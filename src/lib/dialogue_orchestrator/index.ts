@@ -130,6 +130,7 @@ export async function runDialogueTurn(input: DialogueTurnInput): Promise<Dialogu
   }
 
   const parsed = parseDialogueResponse(full);
+  normaliseLoreTitles(parsed, input.story);
 
   let stateUpdate: ApplyStateDeltaResult | undefined;
   if (parsed.stateDelta && hasMeaningfulDelta(parsed.stateDelta) && input.scene) {
@@ -155,6 +156,36 @@ export async function runDialogueTurn(input: DialogueTurnInput): Promise<Dialogu
     appliedDelta: Boolean(stateUpdate),
   });
   return { raw: full, parsed, contextTrace: ctx.trace, responders, stateUpdate };
+}
+
+/**
+ * LLM emits `stateDelta.unlockedLoreTitles` (human-readable titles are more
+ * reliable for the model than opaque ids). Convert them to the canonical
+ * `unlockedLoreEntries` (LoreEntry.id array) expected by StateDelta, then
+ * remove the non-standard field.
+ */
+function normaliseLoreTitles(parsed: ParsedDialogueResponse, story: ParsedStory): void {
+  if (!parsed.stateDelta) return;
+  const raw = parsed.stateDelta as Partial<StateDelta> & { unlockedLoreTitles?: string[] };
+  const titles = raw.unlockedLoreTitles;
+  if (!Array.isArray(titles) || titles.length === 0) return;
+
+  const loreEntries = story.loreEntries || [];
+  const resolved: string[] = [];
+  for (const title of titles) {
+    const entry = loreEntries.find(l => l.title === title);
+    if (entry) {
+      resolved.push(entry.id);
+    } else {
+      console.warn(`[dialogue_orchestrator] unlockedLoreTitles: title not found in story.loreEntries — "${title}"`);
+    }
+  }
+
+  parsed.stateDelta.unlockedLoreEntries = [
+    ...(parsed.stateDelta.unlockedLoreEntries || []),
+    ...resolved,
+  ];
+  delete raw.unlockedLoreTitles;
 }
 
 function hasMeaningfulDelta(d: Partial<StateDelta>): boolean {

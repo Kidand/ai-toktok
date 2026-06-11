@@ -177,6 +177,19 @@ export function RelationshipGraph({ characters, relationships, focusedId }: Prop
                 >
                   {c.name[0]}
                 </text>
+                {/* Always-visible truncated name below the node circle */}
+                <text
+                  x={pos.x} y={pos.y + NODE_R + 13}
+                  textAnchor="middle"
+                  fontSize="11"
+                  fontFamily="var(--font-sans)"
+                  fill="var(--ink)"
+                  opacity={0.8}
+                  style={{ pointerEvents: 'none' }}
+                >
+                  <title>{c.name}</title>
+                  {c.name.length > 5 ? c.name.slice(0, 4) + '…' : c.name}
+                </text>
                 <title>{c.name}</title>
               </g>
             );
@@ -241,7 +254,7 @@ export function RelationshipGraph({ characters, relationships, focusedId }: Prop
           <span style={{ display: 'inline-block', width: 18, height: 3, background: 'var(--hi-coral)' }} />
           敌对
         </span>
-        <span>· 线宽 = 关系强度 · 节点字母 = 姓名首字 · 悬停看全名</span>
+        <span>· 线宽 = 关系强度 · 节点下方 = 姓名 · 悬停看全名</span>
       </div>
     </div>
   );
