@@ -26,7 +26,15 @@ import {
 // silently strand all prior data.
 const CONFIG_KEY = 'ai-toktok-config';
 
-const DB_NAME = 'ai-toktok';
+// ONE DATABASE PER STORE — idb-keyval's createStore opens the database
+// versionless and creates only its own object store in the very first
+// upgrade. Multiple createStore calls on the SAME database therefore leave
+// every store except the first-ever-used one nonexistent, and all their
+// reads/writes reject with NotFoundError. That exact bug shipped here as a
+// single shared 'ai-toktok' DB: story bodies silently never persisted, and
+// "继续" on a save died on loadStory. Data from the old shared DB is pulled
+// over by migrateSharedDbStorage() below.
+const LEGACY_SHARED_DB = 'ai-toktok';
 const STORIES_STORE = 'stories';
 const SAVES_STORE = 'saves';
 // State_updater (Phase 5) writes per-turn delta + per-agent memory entries
@@ -36,16 +44,16 @@ const RUNTIME_MEMORY_STORE = 'runtimeMemory';
 const STATE_DELTAS_STORE = 'stateDeltas';
 
 const storiesDB = typeof window !== 'undefined'
-  ? createStore(DB_NAME, STORIES_STORE)
+  ? createStore('ai-toktok-stories', STORIES_STORE)
   : null!;
 const savesDB = typeof window !== 'undefined'
-  ? createStore(DB_NAME, SAVES_STORE)
+  ? createStore('ai-toktok-saves', SAVES_STORE)
   : null!;
 const runtimeMemoryDB = typeof window !== 'undefined'
-  ? createStore(DB_NAME, RUNTIME_MEMORY_STORE)
+  ? createStore('ai-toktok-runtime-memory', RUNTIME_MEMORY_STORE)
   : null!;
 const stateDeltasDB = typeof window !== 'undefined'
-  ? createStore(DB_NAME, STATE_DELTAS_STORE)
+  ? createStore('ai-toktok-state-deltas', STATE_DELTAS_STORE)
   : null!;
 
 // =============================================================================
@@ -129,9 +137,80 @@ export async function deleteSave(saveId: string): Promise<void> {
 const LEGACY_SAVES_KEY = 'ai-toktok-saves';
 const LEGACY_STORIES_KEY = 'ai-toktok-stories';
 const MIGRATED_KEY = 'ai-toktok-idb-migrated';
+const SPLIT_MIGRATED_KEY = 'ai-toktok-idb-split-migrated';
+
+/** Read every key/value pair out of one object store via cursor. */
+function readAllRows(db: IDBDatabase, store: string): Promise<[IDBValidKey, unknown][]> {
+  return new Promise((resolve, reject) => {
+    const out: [IDBValidKey, unknown][] = [];
+    const req = db.transaction(store, 'readonly').objectStore(store).openCursor();
+    req.onsuccess = () => {
+      const cur = req.result;
+      if (cur) { out.push([cur.key, cur.value]); cur.continue(); }
+      else resolve(out);
+    };
+    req.onerror = () => reject(req.error);
+  });
+}
+
+/**
+ * One-time copy from the old SHARED 'ai-toktok' database into the new
+ * one-DB-per-store layout. The shared DB only ever contained whichever
+ * single store happened to be created first (see the createStore note
+ * above), so we inspect objectStoreNames and copy what actually exists.
+ * The old DB is left in place as a safety net.
+ */
+async function migrateSharedDbStorage(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  if (localStorage.getItem(SPLIT_MIGRATED_KEY)) return;
+
+  try {
+    // Don't create the legacy DB just by probing for it.
+    if (typeof indexedDB.databases === 'function') {
+      const dbs = await indexedDB.databases();
+      if (!dbs.some(d => d.name === LEGACY_SHARED_DB)) {
+        localStorage.setItem(SPLIT_MIGRATED_KEY, '1');
+        return;
+      }
+    }
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(LEGACY_SHARED_DB);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+      // If the DB didn't exist (browsers without indexedDB.databases),
+      // this open creates an empty shell — objectStoreNames will be empty
+      // and the loop below is a no-op.
+      req.onupgradeneeded = () => { /* add no stores */ };
+    });
+
+    const targets: [string, typeof storiesDB][] = [
+      [STORIES_STORE, storiesDB],
+      [SAVES_STORE, savesDB],
+      [RUNTIME_MEMORY_STORE, runtimeMemoryDB],
+      [STATE_DELTAS_STORE, stateDeltasDB],
+    ];
+    for (const [storeName, target] of targets) {
+      if (!db.objectStoreNames.contains(storeName)) continue;
+      const rows = await readAllRows(db, storeName);
+      for (const [key, value] of rows) {
+        await idbSet(key, value, target);
+      }
+      if (rows.length > 0) {
+        console.info(`[storage] migrated ${rows.length} rows from shared DB store "${storeName}"`);
+      }
+    }
+    db.close();
+    localStorage.setItem(SPLIT_MIGRATED_KEY, '1');
+  } catch (err) {
+    console.warn('[storage] shared-DB split migration failed; will retry next launch.', err);
+  }
+}
 
 export async function migrateLegacyStorage(): Promise<void> {
   if (typeof window === 'undefined') return;
+  // Phase 0: shared-DB → per-store DBs (runs even for users who already did
+  // the localStorage→IDB migration below — separate marker).
+  await migrateSharedDbStorage();
   if (localStorage.getItem(MIGRATED_KEY)) return;
 
   try {

@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { useGameStore } from '@/store/gameStore';
 import { LLMConfig, LLMProvider, GameSave } from '@/lib/types';
-import { loadStory } from '@/lib/storage';
+import { loadStory, saveStory } from '@/lib/storage';
 import { parseStoryClient } from '@/lib/parser-client';
 import { verifyLLMConfig } from '@/lib/llm-browser';
 import { PRESETS, type Preset } from '@/lib/presets';
@@ -124,10 +124,27 @@ export default function HomePage() {
   const handleLoadSave = async (save: GameSave) => {
     if (pendingId) return;
     if (!apiKey.trim()) { setError('请先配置 API 密钥'); return; }
+    setError('');
     setPendingId(save.id);
     try {
-      const story = await loadStory(save.storyId);
-      if (!story) { setError('找不到对应的故事数据'); return; }
+      let story = await loadStory(save.storyId).catch((err) => {
+        console.warn('[home] loadStory failed:', err);
+        return null;
+      });
+      // Self-heal: a preset save whose story body is missing in IDB (e.g. the
+      // pre-split shared-DB bug swallowed the write) can be rebuilt from the
+      // bundled preset and re-persisted — the save continues seamlessly.
+      if (!story) {
+        const preset = PRESETS.find(p => p.story.id === save.storyId);
+        if (preset) {
+          story = preset.story;
+          saveStory(story).catch(err => console.warn('[home] preset story re-save failed:', err));
+        }
+      }
+      if (!story) {
+        setError('这份存档的故事数据已丢失（上传的故事正文未能持久化）。该存档无法继续，抱歉。');
+        return;
+      }
       setLLMConfig(buildConfig());
       loadFromSave(save, story);
       router.push('/play');
@@ -533,8 +550,11 @@ export default function HomePage() {
                       </button>
                       {save.isCompleted && save.epilogue ? (
                         <button onClick={async () => {
-                          const story = await loadStory(save.storyId);
+                          const story = await loadStory(save.storyId).catch(() => null)
+                            || PRESETS.find(p => p.story.id === save.storyId)?.story
+                            || null;
                           if (story) { loadFromSave(save, story); router.push('/epilogue'); }
+                          else setError('这份存档的故事数据已丢失，无法打开后日谈。');
                         }} className="btn btn-cyan btn-sm">
                           后日谈
                         </button>
@@ -542,6 +562,11 @@ export default function HomePage() {
                     </div>
                   </article>
                 ))}
+              </div>
+            )}
+            {error && tab === 'saves' && (
+              <div className="mt-3 p-3 border-[2.5px] border-[var(--ink)] bg-[var(--hi-coral-soft)] font-mono text-sm break-words">
+                ⚠ {error}
               </div>
             )}
           </section>

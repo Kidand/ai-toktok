@@ -32,10 +32,12 @@ const MAX_RETRIES = 3;
 // not resumed against a new schema. v5 added factions / loreEntries /
 // conflicts / event causes & consequences (Phase 2).
 const PROMPT_VERSION = '5';
-// Legacy `ai-toktok-*` IDB names retained on purpose — see storage.ts. Renaming
-// would orphan every cached parser snapshot and force users to re-parse stories.
+// Own database — idb-keyval can't host multiple stores in one DB (see the
+// createStore note in storage.ts), and the old shared 'ai-toktok' DB meant
+// this cache store usually never existed at all. Snapshots are disposable,
+// so no migration: a re-parse simply rebuilds them.
 const CACHE_PREFIX = 'ai-toktok-graph-cache:';
-const CACHE_DB = 'ai-toktok';
+const CACHE_DB = 'ai-toktok-graph-cache';
 const CACHE_STORE = 'graphCache';
 
 // In Node (build-preset script) we transparently fall back to no caching, just
